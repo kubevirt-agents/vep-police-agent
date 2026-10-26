@@ -514,11 +514,16 @@ YOUR ANALYSIS TASKS:
    - Flag post-freeze commits without approved exception
    - Check exception request status
    - Validate exception justification if present
+   - POST-CF POLICY: an implementation PR that is still open after Code Freeze but
+     carries both lgtm and approve was approved before the freeze and is awaiting
+     merge (often delayed by routine rebases that drop/re-add lgtm). Such a PR is
+     ON TRACK — do NOT flag it as incomplete, stale, or lacking an exception.
 
 5. CROSS-DOMAIN REASONING (CRITICAL):
    - Low activity + close deadline = URGENT priority
    - Compliance issues + close deadline = CRITICAL priority
-   - Post-freeze work + no exception = BLOCKER
+   - Post-freeze work + no exception + NOT lgtm/approved = BLOCKER
+     (post-CF PRs that are lgtm+approved are awaiting merge, see EXCEPTION HANDLING)
    - Multiple issues on same VEP = escalate priority
 
 6. ATTENTION ASSESSMENT (FOR EVERY VEP):
@@ -600,6 +605,7 @@ and issue category - consolidate related issues into a single alert."""
     all_alerts = []
     all_insights = []
     sheets_need_update_any = False
+    result = None
 
     vep_batches = [veps[i:i + BATCH_SIZE] for i in range(0, len(veps), BATCH_SIZE)]
     log(f"Processing {len(veps)} VEPs in {len(vep_batches)} batch(es) of up to {BATCH_SIZE}", node="analyze_combined")
@@ -740,6 +746,61 @@ VEPs with "_deterministic_attention" set), `general_insights`, `alerts`, and
         except (ValueError, TypeError, ValidationError) as e:
             log(f"Landed shortcut failed for {vep.name}: {e}", node="analyze_combined", level="WARNING")
 
+    # Post-CF correction (issue #48): implementation PRs still open after Code
+    # Freeze that were opened before the freeze and carry lgtm+approve were
+    # approved before the freeze and are awaiting merge (routine rebases drop
+    # and re-add lgtm, which must not be mistaken for inactivity). They are on
+    # track and do not require an exception.
+    cf_deadline = None
+    cf_deadline_str = release_deadlines.get("code_freeze")
+    if cf_deadline_str:
+        try:
+            cf_deadline = datetime.fromisoformat(str(cf_deadline_str))
+            if cf_deadline.tzinfo is None:
+                cf_deadline = cf_deadline.replace(tzinfo=UTC)
+        except ValueError:
+            log(f"Could not parse code_freeze deadline '{cf_deadline_str}'", node="analyze_combined", level="WARNING")
+
+    if cf_deadline:
+        for vep in updated_veps:
+            deadline_ctx = vep.context.deadline if vep.context else {}
+            if not deadline_ctx.get("cf_passed"):
+                continue
+            open_prs = [pr for pr in (vep.implementation_prs or []) if pr.state == "open"]
+            approved_pre_cf = [
+                pr for pr in open_prs
+                if pr.created_at <= cf_deadline and pr.has_lgtm and pr.has_approve
+            ]
+            if not open_prs or len(approved_pre_cf) != len(open_prs):
+                continue
+
+            pr_list = ", ".join(f"#{pr.number}" for pr in open_prs)
+            summary = f"All open impl PRs ({pr_list}) were lgtm+approved before Code Freeze and are awaiting merge (routine rebases may re-add lgtm)."
+            if not vep.analysis:
+                vep.analysis = {}
+            attn = vep.analysis.get("attention") or {}
+            _set_vep_attention(vep, {
+                "attention_level": AttentionLevel.OK,
+                "attention_reasons": [_reason("coverage", summary)],
+                "health_summary": summary,
+                "compliance_flags": attn.get("compliance_flags", []),
+                "suggested_action": None,
+                "staleness": attn.get("staleness") or _compute_staleness(vep),
+                "phase": release_phase,
+            })
+
+            # Drop LLM-generated exception/deadline alerts for this VEP
+            before = len(all_alerts)
+            all_alerts = [
+                a for a in all_alerts
+                if not (a.get("vep_id") == vep.tracking_issue_id
+                        and a.get("subject") in ("exception_required", "deadline_violation"))
+            ]
+            dropped = before - len(all_alerts)
+            log(f"Post-CF correction {vep.name}: open impl PRs ({pr_list}) lgtm+approved pre-CF, treated as awaiting merge", node="analyze_combined")
+            if dropped:
+                log(f"Post-CF correction {vep.name}: dropped {dropped} exception/deadline alert(s)", node="analyze_combined")
+
     # Determine sheets update need
     skip_monitoring = state.get("skip_monitoring", False)
     sheets_need_update = True if skip_monitoring else sheets_need_update_any
@@ -751,10 +812,10 @@ VEPs with "_deterministic_attention" set), `general_insights`, `alerts`, and
     )
 
     # Log results
-    if result.alerts:
-        log(f"Analysis generated {len(result.alerts)} alert(s)", node="analyze_combined")
-    if result.general_insights:
-        log(f"Generated {len(result.general_insights)} general insight(s)", node="analyze_combined")
+    if all_alerts:
+        log(f"Analysis generated {len(all_alerts)} alert(s)", node="analyze_combined")
+    if all_insights:
+        log(f"Generated {len(all_insights)} general insight(s)", node="analyze_combined")
     vep_summary_table = []
     if attention_count > 0:
         log(f"Attention assessments: {attention_count} VEP(s)", node="analyze_combined")
