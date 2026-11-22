@@ -3,12 +3,12 @@
 import os
 
 # Model tier constants for node configuration (overridable via env vars)
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
-HEAVY_MODEL = os.getenv("HEAVY_MODEL", "gemini-3.1-pro-preview")
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-4-hydrogen")
+HEAVY_MODEL = os.getenv("HEAVY_MODEL", "gemini-4-neon")
 
 # Thinking level per tier; "" = model default.
-FAST_THINKING_LEVEL = os.getenv("FAST_THINKING_LEVEL", "")
-HEAVY_THINKING_LEVEL = os.getenv("HEAVY_THINKING_LEVEL", "")
+FAST_THINKING_LEVEL = os.getenv("FAST_THINKING_LEVEL", "low")
+HEAVY_THINKING_LEVEL = os.getenv("HEAVY_THINKING_LEVEL", "medium")
 
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", FAST_MODEL)
 

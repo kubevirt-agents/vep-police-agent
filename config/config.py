@@ -27,7 +27,7 @@ NODE_MODELS: dict[str, str] = {
     "update_sheets": HEAVY_MODEL,
     "alert_summary": HEAVY_MODEL,  # Generates summary-style notifications
 
-    # Context fetch nodes - use fast model (Flash) to fetch data via GitHub MCP
+    # Context fetch nodes - use fast model to fetch data via GitHub MCP
     # These nodes ONLY fetch raw data, NO analysis - analysis is done by analyze_combined
     "fetch_veps": FAST_MODEL,
     "check_activity": FAST_MODEL,

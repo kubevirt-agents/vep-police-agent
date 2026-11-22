@@ -94,9 +94,9 @@ graph TD
 **Flow Summary:**
 1. `scheduler` coordinates all operations on configurable intervals.
 2. `fetch_veps` discovers VEPs from GitHub and returns to scheduler.
-3. Scheduler routes to `run_monitoring`, which fans out to five parallel check nodes (deadlines, activity, compliance, exceptions, phase risks) using Flash model.
+3. Scheduler routes to `run_monitoring`, which fans out to five parallel check nodes (deadlines, activity, compliance, exceptions, phase risks) using the fast model.
 4. `merge_vep_updates` combines context data (deterministic, no LLM).
-5. `analyze_combined` (Pro model) does cross-domain reasoning and generates alerts, anchored to `docs/governance-model.md` (phase playbook, graduated-work rule, and policy rules) and a temporal-context object (cycle phase, days into/left in phase, next freeze) that calibrates urgency to where the cycle stands. Uses the previous release's code freeze date to distinguish current-release vs previous-release PRs - VEPs with only old PRs are flagged instead of shown as complete, except when the targeted stage's design already merged and its implementation landed or is progressing (then the VEP is on track).
+5. `analyze_combined` (heavy model) does cross-domain reasoning and generates alerts, anchored to `docs/governance-model.md` (phase playbook, graduated-work rule, and policy rules) and a temporal-context object (cycle phase, days into/left in phase, next freeze) that calibrates urgency to where the cycle stands. Uses the previous release's code freeze date to distinguish current-release vs previous-release PRs - VEPs with only old PRs are flagged instead of shown as complete, except when the targeted stage's design already merged and its implementation landed or is progressing (then the VEP is on track).
 6. `detect_changes` compares to previous run for accurate change reporting.
 7. `update_sheets`, `update_project_board`, and `alert_summary` run on schedule; alerts fan out to email and Slack.
 
@@ -218,7 +218,7 @@ podman run --rm --pull=newer \
 **Mock/test flags:**
 | Flag | Description |
 |------|-------------|
-| `--fastest-model` | Use Flash model for all nodes |
+| `--fastest-model` | Use fast model for all nodes |
 | `--mock-veps` | Use mock VEPs (no GitHub fetch) |
 | `--mock-analyzed-combined` | Skip LLM in analyze node |
 | `--mock-alert-summary` | Skip LLM in alert node |
@@ -259,13 +259,15 @@ podman run --rm --pull=newer \
 ### Models
 
 Two-tier approach configured in `config.py`:
-- **Flash** (fast): Fetch nodes (`fetch_veps`, `check_*`).
-- **Pro** (powerful): Analysis nodes (`analyze_combined`, `update_sheets`, `alert_summary`).
+- **Fast model**: Fetch nodes (`fetch_veps`, `check_*`).
+- **Powerful model**: Analysis nodes (`analyze_combined`, `update_sheets`, `alert_summary`).
 
 Override models via environment variables:
-- `FAST_MODEL` (default: `gemini-3-flash-preview`)
-- `HEAVY_MODEL` (default: `gemini-3.1-pro-preview`)
+- `FAST_MODEL` (default: `gemini-4-hydrogen`)
+- `HEAVY_MODEL` (default: `gemini-4-neon`)
 - `DEFAULT_MODEL` (default: same as `FAST_MODEL`)
+- `FAST_THINKING_LEVEL` (default: `low`) - thinking level for fast-tier nodes; empty string for model default
+- `HEAVY_THINKING_LEVEL` (default: `medium`) - thinking level for heavy-tier nodes; empty string for model default
 
 The tier is resolved by node name (heavy: `analyze_combined`, `update_sheets`, `alert_summary`; everything else fast), not by model name, so single-model setups work.
 
@@ -279,7 +281,7 @@ Other LLM settings (all env-overridable):
 - `ANALYZE_USE_TOOLS` (default: `false`) - when false, analyze_combined makes a direct structured-output call with no GitHub tools and no MCP server
 - `ALERT_SUMMARY_USE_LLM` (default: `false`) - when false, alert_summary uses the deterministic fallback summary instead of an LLM call
 
-Use `--fastest-model` to force Flash everywhere for testing.
+Use `--fastest-model` to force the fast model everywhere for testing.
 
 ### Google Sheets
 
