@@ -272,6 +272,9 @@ Other LLM settings (all env-overridable):
 - `LLM_TIMEOUT_FAST` (default: `300`) / `LLM_TIMEOUT_HEAVY` (default: `900`) - per-call timeout in seconds; the SDK aborts the HTTP call itself (surfacing as 504 DEADLINE_EXCEEDED) and the wrapper retries a timeout at most once, client-side or server-side alike
 - `LLM_MAX_OUTPUT_TOKENS` (default: `65536`) - output token cap per call (thinking tokens count against it)
 - `LLM_SDK_MAX_RETRIES` (default: `1`) - SDK-level retries per call, kept low so they don't multiply with wrapper retries
+- `FETCH_TOOL_RESULT_MAX_CHARS` (default: `20000`) - per-tool-result cap fed back into the conversation (head-biased truncation)
+- `FETCH_INPUT_TOKEN_BUDGET` (default: `650000`) - past this projected input size the fetch tool loop stops and the node answers with the data gathered so far
+- `FETCH_INPUT_TOKEN_HARD_CAP` (default: `900000`) - past this the newest tool results are also shrunk so the final call fits the context window
 
 Use `--fastest-model` to force Flash everywhere for testing.
 

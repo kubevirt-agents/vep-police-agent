@@ -45,6 +45,12 @@ def test_empty_thinking_level_maps_to_model_default():
         assert config.get_llm_settings_for_node("fetch_veps") == (None, 300)
 
 
+def test_check_compliance_has_iteration_override():
+    from config.config import NODE_MAX_ITERATIONS
+
+    assert NODE_MAX_ITERATIONS.get("check_compliance") == 20
+
+
 def test_env_int_and_bool_helpers(monkeypatch):
     monkeypatch.setenv("TEST_X_INT", "42")
     assert config_util._env_int("TEST_X_INT", 1) == 42

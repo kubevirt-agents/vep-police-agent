@@ -10,15 +10,28 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
 from config.config import (
+    FETCH_INPUT_TOKEN_BUDGET,
+    FETCH_INPUT_TOKEN_HARD_CAP,
+    FETCH_TOOL_RESULT_MAX_CHARS,
     LLM_INITIAL_DELAY,
     LLM_MAX_OUTPUT_TOKENS,
     LLM_MAX_RETRIES,
     LLM_TIMEOUT_RETRIES,
+    NODE_MAX_ITERATIONS,
 )
 from services.mcp_factory import get_mcp_tools_by_name
 from services.utils import get_model, log
 
 T = TypeVar('T', bound=BaseModel)
+
+# Parallel tool execution: every MCP tool call spawns its own server process
+# on its own event loop (services/mcp_factory.make_tool_func), so concurrent
+# calls share no state - the pool only bounds how many run at once.
+TOOL_CALL_MAX_WORKERS = 6
+
+# Floor for a shrunk tool result - keeps the tool_call/ToolMessage pairing
+# meaningful while trimming context.
+_MIN_TOOL_RESULT_CHARS = 200
 
 
 # Server-side deadline error: the SDK timeout aborts the HTTP call, which the
@@ -124,6 +137,99 @@ def _classify_llm_error(e: BaseException) -> str:
     if "INVALID_ARGUMENT" in error_str or " 400" in f" {error_str}":
         return "invalid_argument"
     return "other"
+
+
+def _truncate_tool_result(result: Any, max_chars: int = FETCH_TOOL_RESULT_MAX_CHARS) -> str:
+    """Cap a tool result string, head-biased.
+
+    VEP files keep front matter and the Summary near the top, so keep ~85%
+    head / ~15% tail and mark how many chars were cut.
+    """
+    text = result if isinstance(result, str) else str(result)
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.85)
+    tail = max_chars - head
+    return f"{text[:head]}\n[TRUNCATED {len(text) - max_chars} CHARS]\n{text[-tail:] if tail > 0 else ''}"
+
+
+def _execute_tool_calls(tool_calls: list[dict], tools: list, operation_type: str) -> list[ToolMessage]:
+    """Execute a turn's tool calls in parallel, preserving order and ids.
+
+    Every call already spawns its own MCP process (see mcp_factory), so this
+    is thread-safe. Results are returned in the original tool_call order with
+    matching tool_call_ids - Gemini rejects an AIMessage whose tool_calls
+    have no ToolMessage. Never skips a call.
+    """
+    tools_by_name = {tool.name: tool for tool in tools}
+
+    def run_one(tool_call: dict) -> str:
+        tool_name = tool_call.get("name", "")
+        tool_args = tool_call.get("args", {})
+        log(f"Executing tool: {tool_name} with args: {json.dumps(tool_args, default=str)}",
+            node=operation_type, level="DEBUG")
+        tool = tools_by_name.get(tool_name)
+        if tool is None:
+            log(f"Tool {tool_name} not found in available tools: {list(tools_by_name)}",
+                node=operation_type, level="WARNING")
+            return f"Tool {tool_name} not found"
+        try:
+            result = str(tool.func(**tool_args))
+        except Exception as e:
+            log(f"Error executing tool {tool_name}: {e}", node=operation_type, level="ERROR")
+            import traceback
+            log(f"Tool error traceback: {traceback.format_exc()}", node=operation_type, level="DEBUG")
+            return f"Error: {e!s}"
+        # Log tool result (truncate if too long)
+        result_preview = result[:200] + "... (truncated)" if len(result) > 200 else result
+        log(f"Tool {tool_name} result: {result_preview}", node=operation_type, level="DEBUG")
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=TOOL_CALL_MAX_WORKERS) as executor:
+        results = list(executor.map(run_one, tool_calls))
+
+    return [
+        ToolMessage(content=_truncate_tool_result(result), tool_call_id=tool_call.get("id", ""))
+        for tool_call, result in zip(tool_calls, results)
+    ]
+
+
+def _estimate_input_tokens(messages: list, response) -> int:
+    """Estimate the input tokens of the NEXT LLM call.
+
+    Prefers the exact count from the last AIMessage's usage_metadata; falls
+    back to a chars/4 estimate over the conversation so far.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
+    if isinstance(input_tokens, int):
+        return input_tokens
+    return sum(len(str(getattr(m, "content", ""))) for m in messages) // 4
+
+
+def _shrink_tool_messages(
+    tool_messages: list[ToolMessage], base_input_tokens: int, operation_type: str,
+) -> list[ToolMessage]:
+    """Proportionally shrink the newest ToolMessages to fit the hard cap.
+
+    Keeps every AIMessage tool_call paired with its ToolMessage (Gemini
+    rejects unmatched tool_calls) - only the result contents get shorter.
+    """
+    allowed_chars = max(0, FETCH_INPUT_TOKEN_HARD_CAP - base_input_tokens) * 4
+    total_chars = sum(len(m.content) for m in tool_messages)
+    if not tool_messages or total_chars <= allowed_chars:
+        return tool_messages
+
+    scale = allowed_chars / total_chars
+    log(f"Shrinking {len(tool_messages)} tool result(s) ({total_chars} chars) to ~{allowed_chars} chars "
+        f"to fit the {FETCH_INPUT_TOKEN_HARD_CAP}-token hard cap",
+        node=operation_type, level="WARNING")
+    shrunk = []
+    for m in tool_messages:
+        target = max(_MIN_TOOL_RESULT_CHARS, int(len(m.content) * scale))
+        content = _truncate_tool_result(m.content, target) if len(m.content) > target else m.content
+        shrunk.append(ToolMessage(content=content, tool_call_id=m.tool_call_id))
+    return shrunk
 
 
 def _structured_output_call(
@@ -248,8 +354,9 @@ def invoke_llm_with_tools(
             max_iterations = 5
             log(f"Debug mode 'test-sheets' enabled - limiting to {max_iterations} iteration(s)", node=operation_type, level="INFO")
         else:
-            # Increased for fetch_veps which may need to read many issue details
-            max_iterations = 30 if operation_type == "fetch_veps" else 10
+            # fetch_veps may need to read many issue details; other nodes less
+            default_iterations = 30 if operation_type == "fetch_veps" else 10
+            max_iterations = NODE_MAX_ITERATIONS.get(operation_type, default_iterations)
         iteration = 0
         tool_call_counts = {}  # Track tool calls for summary
         tool_call_failures = 0  # Track how many attempted tool calls errored
@@ -271,52 +378,42 @@ def invoke_llm_with_tools(
 
             log(f"LLM made {len(response.tool_calls)} tool call(s), iteration {iteration}", node=operation_type)
 
-            # Execute tool calls
-            tool_messages = []
+            # Track tool calls for summary
             for tool_call in response.tool_calls:
                 tool_name = tool_call.get("name", "")
-                tool_args = tool_call.get("args", {})
-
-                # Track tool call for summary
                 tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
 
-                # Log tool call details (full args for debugging parameter issues)
-                log(f"Executing tool: {tool_name} with args: {json.dumps(tool_args, default=str)}", node=operation_type, level="DEBUG")
-                
-                # Find and execute the tool
-                tool_result = None
-                for tool in tools:
-                    if tool.name == tool_name:
-                        try:
-                            tool_result = tool.func(**tool_args)
-                            # Log tool result (truncate if too long)
-                            result_str = str(tool_result)
-                            if len(result_str) > 200:
-                                result_str = result_str[:200] + "... (truncated)"
-                            log(f"Tool {tool_name} result: {result_str}", node=operation_type, level="DEBUG")
-                            break
-                        except Exception as e:
-                            tool_result = f"Error: {e!s}"
-                            log(f"Error executing tool {tool_name}: {e}", node=operation_type, level="ERROR")
-                            import traceback
-                            log(f"Tool error traceback: {traceback.format_exc()}", node=operation_type, level="DEBUG")
-                
-                if tool_result is None:
-                    tool_result = f"Tool {tool_name} not found"
-                    log(f"Tool {tool_name} not found in available tools: {[t.name for t in tools]}", node=operation_type, level="WARNING")
+            # Execute this turn's tool calls in parallel and append the
+            # results in the original tool_call order.
+            tool_messages = _execute_tool_calls(response.tool_calls, tools, operation_type)
+            tool_call_failures += sum(1 for m in tool_messages if _is_tool_call_error(m.content))
 
-                if _is_tool_call_error(tool_result):
-                    tool_call_failures += 1
-
-                # Create tool message
-                tool_messages.append(ToolMessage(
-                    content=str(tool_result),
-                    tool_call_id=tool_call.get("id", "")
-                ))
-            
-            # Add tool results and continue
+            # Context budget check AFTER the tools ran, so every tool_call
+            # already has its ToolMessage - an AIMessage with unanswered
+            # tool_calls at the end of history would 400 the final call.
+            base_input_tokens = _estimate_input_tokens(messages, response)
+            added_chars = sum(len(m.content) for m in tool_messages)
             messages.append(response)
             messages.extend(tool_messages)
+            projected = base_input_tokens + added_chars // 4
+
+            if projected > FETCH_INPUT_TOKEN_HARD_CAP:
+                tool_messages = _shrink_tool_messages(tool_messages, base_input_tokens, operation_type)
+                messages[-len(tool_messages):] = tool_messages
+                added_chars = sum(len(m.content) for m in tool_messages)
+                projected = base_input_tokens + added_chars // 4
+
+            if projected > FETCH_INPUT_TOKEN_BUDGET:
+                vep_note = ""
+                if isinstance(state_context, dict) and state_context.get("veps"):
+                    vep_note = f", {len(state_context['veps'])} VEP(s) in this fetch's scope"
+                total_tool_calls = sum(tool_call_counts.values())
+                log(f"CONTEXT_BUDGET_STOP op={operation_type}: projected next input ~{projected} tokens "
+                    f"(input_tokens={base_input_tokens}, +{added_chars} chars of new tool results) "
+                    f"exceeds budget {FETCH_INPUT_TOKEN_BUDGET} after {total_tool_calls} tool call(s){vep_note}; "
+                    "stopping the tool loop and answering with the data gathered so far",
+                    node=operation_type, level="WARNING")
+                break
 
         # Now get structured output with final messages (including tool results)
         messages.append(HumanMessage(content="Based on the information gathered, please provide your response in the required structured format."))

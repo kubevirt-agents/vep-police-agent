@@ -64,3 +64,17 @@ LLM_MAX_OUTPUT_TOKENS: int = _env_int("LLM_MAX_OUTPUT_TOKENS", 65536)
 LLM_SDK_MAX_RETRIES: int = _env_int("LLM_SDK_MAX_RETRIES", 1)
 # Wrapper-level retries on call timeout (on top of the first attempt).
 LLM_TIMEOUT_RETRIES: int = _env_int("LLM_TIMEOUT_RETRIES", 1)
+
+# Fetch-loop context budget (input tokens). Past the budget the tool loop
+# stops and the node answers with the data gathered so far; past the hard
+# cap the newest tool results are also shrunk so the final call fits the
+# model's context window.
+FETCH_TOOL_RESULT_MAX_CHARS: int = _env_int("FETCH_TOOL_RESULT_MAX_CHARS", 20000)
+FETCH_INPUT_TOKEN_BUDGET: int = _env_int("FETCH_INPUT_TOKEN_BUDGET", 650000)
+FETCH_INPUT_TOKEN_HARD_CAP: int = _env_int("FETCH_INPUT_TOKEN_HARD_CAP", 900000)
+
+# Per-node tool-loop iteration overrides. Default is 30 for fetch_veps and
+# 10 for everything else (5 in the "test-sheets" debug mode).
+NODE_MAX_ITERATIONS: dict[str, int] = {
+    "check_compliance": 20,
+}
