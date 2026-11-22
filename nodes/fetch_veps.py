@@ -75,6 +75,42 @@ def _parse_target_release_from_file(vep_file_content: str) -> str | None:
     return None
 
 
+def _filter_veps(discovered_veps: list, vep_filter: list[str]) -> list:
+    """Keep only the VEPs named by --veps tokens (debug subset).
+
+    Tokens are tracking issue numbers ("491") or VEP names ("vep-0491",
+    "VEP 491"). Returns the filtered list; logs what was kept so a subset
+    run is visible in the logs.
+    """
+    filter_ids: set[int] = set()
+    filter_names: set[str] = set()
+    for token in vep_filter:
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            filter_ids.add(int(token))
+            continue
+        name = _extract_vep_number_from_text(token)
+        if name:
+            filter_names.add(name)
+            filter_ids.add(int(name.removeprefix("vep-")))
+        else:
+            log(f"Could not parse VEP filter token: {token!r} (expected '491' or 'vep-0491')",
+                node="fetch_veps", level="WARNING")
+
+    kept = [
+        vep for vep in discovered_veps
+        if vep.tracking_issue_id in filter_ids or vep.name in filter_names
+    ]
+    log(f"VEP filter active: kept {len(kept)}/{len(discovered_veps)} VEP(s) "
+        f"(filter: {', '.join(t.strip() for t in vep_filter if t.strip())})",
+        node="fetch_veps", level="WARNING")
+    if not kept:
+        log("VEP filter matched no VEPs", node="fetch_veps", level="WARNING")
+    return kept
+
+
 def _create_vep_from_board_item(
     issue_number: int,
     board_vep: dict[str, Any],
@@ -534,6 +570,14 @@ def fetch_veps_node(state: VEPState) -> Any:
                 vep_info.current_milestone.all_code_prs_merged = all_merged
             else:
                 vep_info.current_milestone.all_code_prs_merged = False
+
+    # ---- Debug subset filter (--veps) ----
+    # Applied after reconciliation so the filtered VEPs still get fully
+    # reconciled impl-PR lists. Runs on a subset never touch the board,
+    # sheets, or notifications (main.py forces the skip flags).
+    vep_filter = state.get("vep_filter") or []
+    if vep_filter:
+        discovered_veps = _filter_veps(discovered_veps, vep_filter)
 
     # Log summary
     log("="*80, node="fetch_veps")

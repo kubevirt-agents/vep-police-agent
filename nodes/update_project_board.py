@@ -158,6 +158,19 @@ def update_project_board_node(state: VEPState) -> Any:
     # next-cycle-only). Without this, an item that leaves scope keeps
     # whatever stale values a prior cycle wrote forever, since fetch_veps
     # drops out-of-scope items before the summary table is ever built.
+    #
+    # Structural guard: the summary table must cover every discovered VEP
+    # before any clearing happens. A partial table (analysis failures, dropped
+    # batches) would make in-scope VEPs look out-of-scope and wipe their
+    # fields - skip reconciliation entirely in that case.
+    discovered_count = len(state.get("veps", []))
+    if len(table_rows) < discovered_count:
+        log(f"Summary table has {len(table_rows)} row(s) but {discovered_count} VEP(s) were "
+            "discovered - skipping out-of-scope board reconciliation (would clear in-scope VEPs)",
+            node="update_board", level="WARNING")
+        last_check_times["update_project_board"] = datetime.now(UTC)
+        return {"last_check_times": last_check_times}
+
     cleared = 0
     clear_skipped = 0
     out_of_scope_total = 0

@@ -223,6 +223,7 @@ podman run --rm --pull=newer \
 | `--mock-analyzed-combined` | Skip LLM in analyze node |
 | `--mock-alert-summary` | Skip LLM in alert node |
 | `--use-state-cache` | Use cached state from previous run |
+| `--veps 491,vep-0465` | Debug subset: only these VEPs. Force-skips board/sheets/email/Slack writes, detect_changes and snapshots, and writes the state cache to `cache/state_cache_subset.json` |
 
 **Cache control:**
 | Flag | Description |
@@ -308,6 +309,7 @@ All operations run every 12 hours on round hours by default. Configure intervals
 Cache files in `cache/` directory:
 - `index_cache.json`: VEP data from GitHub (default: 60 min).
 - `state_cache.json`: State snapshot for `--use-state-cache`.
+- `state_cache_subset.json`: Same, but written by `--veps` subset runs so prod's cache is not polluted.
 - `history/`: Snapshots for change detection (keeps last 24).
 - `alert_persistence.json`: Tracks escalation logic.
 
@@ -349,6 +351,27 @@ python main.py --one-cycle \
 ls output/vep_snapshot_*.yaml
 cat output/realizations.txt
 ```
+
+### Replaying analysis on a cached state
+
+`scripts/replay_analyze.py` re-runs analyze_combined on a saved state cache -
+no graph, no scheduler, no external writes. Useful for tuning the heavy
+model / thinking level / timeout against real batch shapes:
+
+```bash
+# Inside the container, from /workspace
+python3 scripts/replay_analyze.py \
+  --state-cache cache/state_cache_subset.json \
+  --out output/replay_analyze.json
+
+# Optional: replay only some VEPs
+python3 scripts/replay_analyze.py --veps 491,465
+```
+
+Prints a per-VEP table (number, urgency, comment) plus wall time per batch,
+and writes `{number: {urgency, comment, attention_level, ...}}` to `--out`.
+Model/thinking/timeout come from the usual env vars (`HEAVY_MODEL`,
+`HEAVY_THINKING_LEVEL`, `LLM_TIMEOUT_HEAVY`).
 
 ## Troubleshooting
 

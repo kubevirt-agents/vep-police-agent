@@ -208,3 +208,42 @@ def test_skip_update_board_flag_short_circuits(monkeypatch):
 
     assert update_calls == []
     assert clear_calls == []
+
+
+def test_partial_summary_table_skips_out_of_scope_clearing(monkeypatch):
+    """Guard: when the summary table covers fewer VEPs than were discovered
+    (analysis failures, dropped batches), reconciliation must not run - it
+    would treat the missing in-scope VEPs as out-of-scope and wipe their
+    board fields."""
+    board_veps = {
+        100: _board_item("ITEM_100"),  # in scope, has a table row
+        101: _board_item("ITEM_101"),  # in scope, but its row was dropped
+        323: _board_item("ITEM_323"),  # genuinely out of scope
+    }
+    update_calls = []
+    clear_calls = []
+    _install_common_mocks(monkeypatch, board_veps, update_calls, clear_calls)
+
+    state = {
+        "current_release": "v1.10",
+        "vep_summary_table": [
+            {
+                "vep_number": 100,
+                "urgency": "GREEN",
+                "status_comment": "On track",
+                "proposal_prs": [],
+                "impl_prs": [],
+            }
+        ],
+        # 2 discovered VEPs (100, 101) but only 1 table row.
+        "veps": [{"tracking_issue_id": 100}, {"tracking_issue_id": 101}],
+    }
+
+    board_module.update_project_board_node(state)
+
+    # The in-scope write still happened...
+    assert len(update_calls) == 1
+    assert update_calls[0][1] == "ITEM_100"
+    # ...but no out-of-scope clearing - including for the truly out-of-scope
+    # item, since the guard cannot tell dropped rows from out-of-scope ones.
+    assert clear_calls == []

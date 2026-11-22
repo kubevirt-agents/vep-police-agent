@@ -155,6 +155,13 @@ def snapshot_node(state: VEPState) -> Any:
     """Graph node that writes per-cycle snapshot and realizations."""
     import time as _time
 
+    if state.get("vep_filter"):
+        # A subset run must not write snapshots or realizations - the next
+        # full run would diff against a subset state and report the rest as
+        # removed.
+        log("VEP subset run: skipping snapshot and realizations", node="snapshot", level="WARNING")
+        return {}
+
     last_checks = state.get("last_check_times", {})
     fetch_time = last_checks.get("fetch_veps")
     cycle_duration = 0.0

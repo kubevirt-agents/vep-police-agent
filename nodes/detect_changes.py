@@ -29,6 +29,12 @@ def detect_changes_node(state: VEPState) -> Any:
     last_check_times = state.get("last_check_times", {})
     last_check_times["detect_changes"] = datetime.now(UTC)
 
+    if state.get("vep_filter"):
+        # A subset run must not diff against the full-run snapshot - it would
+        # report every non-subset VEP as removed.
+        log("VEP subset run: skipping detect_changes", node="detect_changes", level="WARNING")
+        return {"last_check_times": last_check_times}
+
     # Build current state snapshot (same format as cache)
     veps = state.get("veps", [])
     release_schedule = state.get("release_schedule")
