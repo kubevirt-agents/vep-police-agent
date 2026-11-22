@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from config.config import ALERT_SUMMARY_USE_LLM
 from nodes.escalation import escalate_alerts
 from services.llm_helper import invoke_llm_with_tools
 from services.utils import log
@@ -278,18 +279,29 @@ Generate:
 
 Keep alerts concise. Limit to the top {MAX_ALERTS} by severity."""
 
-    # Use LLM to generate formatted summary
-    result = invoke_llm_with_tools(
-        "alert_summary",
-        context,
-        system_prompt,
-        user_prompt,
-        AlertSummaryResponse,
-        mcp_names=()  # No MCP tools needed for formatting
-    )
-
-    # Convert to dicts for state
-    formatted_alerts = [a.model_dump() for a in result.alerts] if result.alerts else limited_alerts
+    # ALERT_SUMMARY_USE_LLM=False (default) preserves the historical behaviour:
+    # the deterministic fallback summary, no LLM call. When True, the tool-free
+    # LLM path formats the summary (no MCP servers spawned).
+    if ALERT_SUMMARY_USE_LLM:
+        result = invoke_llm_with_tools(
+            "alert_summary",
+            context,
+            system_prompt,
+            user_prompt,
+            AlertSummaryResponse,
+            mcp_names=()  # Tool-free call - no MCP tools needed for formatting
+        )
+        # Convert to dicts for state
+        formatted_alerts = [a.model_dump() for a in result.alerts] if result.alerts else limited_alerts
+        summary_text = result.summary_text or _build_fallback_summary(formatted_alerts, veps, general_insights)
+        executive_summary = result.executive_summary
+        changes_since_last = result.changes_since_last
+    else:
+        log("ALERT_SUMMARY_USE_LLM disabled - using deterministic fallback summary", node="alert_summary")
+        formatted_alerts = limited_alerts
+        summary_text = _build_fallback_summary(formatted_alerts, veps, general_insights)
+        executive_summary = ""
+        changes_since_last = ""
 
     log_msg = f"Summary: {len(formatted_alerts)} alert(s)"
     if severity_counts:
@@ -299,9 +311,9 @@ Keep alerts concise. Limit to the top {MAX_ALERTS} by severity."""
 
     output = {
         "last_check_times": last_check_times,
-        "alert_summary_text": result.summary_text or _build_fallback_summary(formatted_alerts, veps, general_insights),
-        "executive_summary": result.executive_summary,
-        "changes_since_last": result.changes_since_last,
+        "alert_summary_text": summary_text,
+        "executive_summary": executive_summary,
+        "changes_since_last": changes_since_last,
     }
 
     # Handle one-cycle mode exit

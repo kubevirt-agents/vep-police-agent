@@ -2,6 +2,8 @@
 
 # Re-export config values
 from .config import (
+    ALERT_SUMMARY_USE_LLM,
+    ANALYZE_USE_TOOLS,
     EMAIL_RECIPIENTS,
     FETCH_INPUT_TOKEN_BUDGET,
     FETCH_INPUT_TOKEN_HARD_CAP,

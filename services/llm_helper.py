@@ -297,7 +297,9 @@ def invoke_llm_with_tools(
         system_prompt: System prompt describing the task
         user_prompt: User prompt with specific instructions
         response_model: Pydantic model for structured output
-        mcp_names: Tuple of MCP server names to load tools from (default: ("github",))
+        mcp_names: Tuple of MCP server names to load tools from (default: ("github",)).
+            An empty tuple means a tool-free call: no MCP servers are spawned
+            and the LLM answers directly with structured output.
         require_tools: If True, raises NoToolsCalledException if LLM doesn't call any tools
 
     Returns:
@@ -315,6 +317,14 @@ def invoke_llm_with_tools(
         model_name = config.get_model_for_node(operation_type)
         log(f"Using model {model_name} for {operation_type}", node=operation_type, level="DEBUG")
         _, timeout_seconds = config.get_llm_settings_for_node(operation_type)
+
+        if not mcp_names:
+            # Tool-free path: no MCP servers spawned, no tool loop - the LLM
+            # answers directly with structured output.
+            log(f"Tool-free call for {operation_type} (no MCP servers requested)", node=operation_type)
+            llm = get_model(model_name=model_name, node=operation_type)
+            messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            return _structured_output_call(llm, messages, response_model, operation_type, timeout_seconds)
 
         # Get MCP tools
         tools = get_mcp_tools_by_name(*mcp_names)
@@ -514,7 +524,8 @@ def invoke_llm_check(
     state_context: dict[str, Any],
     system_prompt: str,
     user_prompt: str,
-    response_model: type[T]
+    response_model: type[T],
+    use_tools: bool = True
 ) -> T:
     """Invoke LLM to perform a check with GitHub MCP tools using structured output.
 
@@ -526,11 +537,16 @@ def invoke_llm_check(
         system_prompt: System prompt describing the task
         user_prompt: User prompt with specific instructions
         response_model: Pydantic model for structured output
+        use_tools: If False, make a direct structured-output call with no
+            GitHub tools bound and no MCP server spawned.
 
     Returns:
         Validated Pydantic model instance
     """
-    return invoke_llm_with_tools(check_type, state_context, system_prompt, user_prompt, response_model, mcp_names=("github",))
+    return invoke_llm_with_tools(
+        check_type, state_context, system_prompt, user_prompt, response_model,
+        mcp_names=("github",) if use_tools else (),
+    )
 
 
 def invoke_llm_fetch(

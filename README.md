@@ -275,6 +275,8 @@ Other LLM settings (all env-overridable):
 - `FETCH_TOOL_RESULT_MAX_CHARS` (default: `20000`) - per-tool-result cap fed back into the conversation (head-biased truncation)
 - `FETCH_INPUT_TOKEN_BUDGET` (default: `650000`) - past this projected input size the fetch tool loop stops and the node answers with the data gathered so far
 - `FETCH_INPUT_TOKEN_HARD_CAP` (default: `900000`) - past this the newest tool results are also shrunk so the final call fits the context window
+- `ANALYZE_USE_TOOLS` (default: `false`) - when false, analyze_combined makes a direct structured-output call with no GitHub tools and no MCP server
+- `ALERT_SUMMARY_USE_LLM` (default: `false`) - when false, alert_summary uses the deterministic fallback summary instead of an LLM call
 
 Use `--fastest-model` to force Flash everywhere for testing.
 

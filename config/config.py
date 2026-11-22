@@ -1,7 +1,7 @@
 """Configuration values for VEP governance agent."""
 
 
-from .util import FAST_MODEL, HEAVY_MODEL, _env_int
+from .util import FAST_MODEL, HEAVY_MODEL, _env_bool, _env_int
 
 # Default release version (used when release cannot be auto-detected)
 DEFAULT_RELEASE: str = "v1.9"
@@ -72,6 +72,13 @@ LLM_TIMEOUT_RETRIES: int = _env_int("LLM_TIMEOUT_RETRIES", 1)
 FETCH_TOOL_RESULT_MAX_CHARS: int = _env_int("FETCH_TOOL_RESULT_MAX_CHARS", 20000)
 FETCH_INPUT_TOKEN_BUDGET: int = _env_int("FETCH_INPUT_TOKEN_BUDGET", 650000)
 FETCH_INPUT_TOKEN_HARD_CAP: int = _env_int("FETCH_INPUT_TOKEN_HARD_CAP", 900000)
+
+# analyze_combined: bind GitHub tools (True) or make a direct structured-output
+# call with no tools and no MCP server (False, default).
+ANALYZE_USE_TOOLS: bool = _env_bool("ANALYZE_USE_TOOLS", False)
+# alert_summary: use the LLM formatting path (True) or the deterministic
+# fallback summary (False, default - the historical behaviour).
+ALERT_SUMMARY_USE_LLM: bool = _env_bool("ALERT_SUMMARY_USE_LLM", False)
 
 # Per-node tool-loop iteration overrides. Default is 30 for fetch_veps and
 # 10 for everything else (5 in the "test-sheets" debug mode).

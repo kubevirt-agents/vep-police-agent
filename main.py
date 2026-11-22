@@ -223,6 +223,11 @@ def log_startup_flags(args, index_cache_minutes: int) -> None:
     if args.use_state_cache:
         log("Use-state-cache mode: first cycle will use cached state (skipping fetch/analyze), subsequent cycles run normally", node="main")
 
+    # Config-gated LLM paths - make the active path visible at startup
+    from config.config import ALERT_SUMMARY_USE_LLM, ANALYZE_USE_TOOLS
+    log(f"analyze_combined: {'GitHub tools enabled' if ANALYZE_USE_TOOLS else 'tool-free (direct structured-output call, ANALYZE_USE_TOOLS=false)'}", node="main")
+    log(f"alert_summary: {'LLM formatting (ALERT_SUMMARY_USE_LLM=true)' if ALERT_SUMMARY_USE_LLM else 'deterministic fallback, no LLM call'}", node="main")
+
 
 def parse_args():
     """Parse command line arguments."""

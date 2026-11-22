@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from config.config import ANALYZE_USE_TOOLS
 from nodes.alert_formatting import build_markdown_table, build_vep_summary_table
 from services.indexer import create_indexed_context
 from services.llm_helper import invoke_llm_check
@@ -679,7 +680,12 @@ VEPs with "_deterministic_attention" set), `general_insights`, `alerts`, and
 `sheets_need_update`. Do NOT echo back full VEP objects."""
 
         try:
-            result = invoke_llm_check("analyze_combined", batch_context, system_prompt, batch_user_prompt, AnalyzeAttentionResponse)
+            # ANALYZE_USE_TOOLS=False (default) makes this a direct structured-
+            # output call: no GitHub tools bound, no MCP server spawned.
+            result = invoke_llm_check(
+                "analyze_combined", batch_context, system_prompt, batch_user_prompt,
+                AnalyzeAttentionResponse, use_tools=ANALYZE_USE_TOOLS,
+            )
 
             # Merge the LLM's lean attention updates onto the ORIGINAL VEP objects
             # (matched by tracking_issue_id) - the LLM no longer echoes full VEPInfo.
@@ -750,11 +756,12 @@ VEPs with "_deterministic_attention" set), `general_insights`, `alerts`, and
         if hasattr(vep, 'analysis') and vep.analysis and vep.analysis.get("attention")
     )
 
-    # Log results
-    if result.alerts:
-        log(f"Analysis generated {len(result.alerts)} alert(s)", node="analyze_combined")
-    if result.general_insights:
-        log(f"Generated {len(result.general_insights)} general insight(s)", node="analyze_combined")
+    # Log results. Use the accumulated lists, not the last batch's result -
+    # `result` is unbound when every batch raised.
+    if all_alerts:
+        log(f"Analysis generated {len(all_alerts)} alert(s)", node="analyze_combined")
+    if all_insights:
+        log(f"Generated {len(all_insights)} general insight(s)", node="analyze_combined")
     vep_summary_table = []
     if attention_count > 0:
         log(f"Attention assessments: {attention_count} VEP(s)", node="analyze_combined")

@@ -333,6 +333,27 @@ def test_deadline_exceeded_retry_can_succeed(capsys):
     assert "hit a server-side deadline (504)" in capsys.readouterr().out
 
 
+def test_deadline_exceeded_logged_with_timeout_kind(capsys):
+    """504 DEADLINE_EXCEEDED is tagged kind=timeout, not kind=other."""
+    llm = _fake_llm([])
+    llm.with_structured_output.return_value.invoke.side_effect = \
+        RuntimeError("504 DEADLINE_EXCEEDED. {'error': {'code': 504}}")
+
+    with patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)), \
+         patch("services.llm_helper.LLM_INITIAL_DELAY", 0):
+        result = invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    out = capsys.readouterr().out
+    assert "LLM_CALL_FAILED op=analyze_combined kind=timeout" in out
+    assert "kind=other" not in out
+    assert result.context_updates == []
+
+
 def test_deadline_error_match_is_word_bounded():
     """PR/issue numbers like 5043 must not be mistaken for a 504 deadline."""
     from services.llm_helper import _is_deadline_exceeded
@@ -341,6 +362,106 @@ def test_deadline_error_match_is_word_bounded():
     assert _is_deadline_exceeded(RuntimeError("upstream returned 504 after 30s"))
     assert not _is_deadline_exceeded(RuntimeError("error fetching PR 5043: not found"))
     assert not _is_deadline_exceeded(RuntimeError("400 INVALID_ARGUMENT"))
+
+
+# ---- Tool-free path (empty mcp_names) ----
+
+
+def test_empty_mcp_names_makes_direct_structured_call():
+    """mcp_names=() is a real tool-free LLM call: no MCP servers spawned, no
+    tool loop - straight to structured output on system+user messages."""
+    llm = _fake_llm([])
+
+    with patch("services.llm_helper.get_mcp_tools_by_name") as mock_get_tools, \
+         patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)):
+        result = invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    mock_get_tools.assert_not_called()
+    llm.bind_tools.assert_not_called()
+    llm.with_structured_output.assert_called_once_with(FetchResponse, include_raw=True)
+    structured_messages = llm.with_structured_output.return_value.invoke.call_args[0][0]
+    assert len(structured_messages) == 2  # system + user only
+    assert result is not None
+
+
+def test_tool_free_parse_failure_falls_back_to_empty_model():
+    llm = _fake_llm([])
+    llm.with_structured_output.return_value.invoke.return_value = {
+        "raw": MagicMock(),
+        "parsed": None,
+        "parsing_error": ValueError("bad json"),
+    }
+
+    with patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)):
+        result = invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    assert result.context_updates == []
+
+
+def test_structured_call_logs_output_tokens(capsys):
+    llm = _fake_llm([], usage={"input_tokens": 1234, "output_tokens": 5678})
+
+    with patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)):
+        invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    out = capsys.readouterr().out
+    assert "LLM_CALL_USAGE op=analyze_combined" in out
+    assert "output_tokens=5678" in out
+
+
+# ---- Loud failure tagging ----
+
+
+def test_llm_call_failed_logged_with_invalid_argument_kind(capsys):
+    llm = _fake_llm([])
+    llm.with_structured_output.return_value.invoke.side_effect = \
+        RuntimeError("400 INVALID_ARGUMENT: request payload too large")
+
+    with patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)):
+        result = invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    out = capsys.readouterr().out
+    assert "LLM_CALL_FAILED op=analyze_combined kind=invalid_argument" in out
+    assert result.context_updates == []
+
+
+def test_llm_call_failed_timeout_kind(capsys):
+    llm = _fake_llm([])
+    llm.with_structured_output.return_value.invoke.side_effect = \
+        concurrent.futures.TimeoutError()
+
+    with patch("services.llm_helper.get_model", return_value=llm), \
+         patch("config.get_model_for_node", return_value="fake-model"), \
+         patch("config.get_llm_settings_for_node", return_value=("high", 900)), \
+         patch("services.llm_helper.LLM_INITIAL_DELAY", 0):
+        result = invoke_llm_with_tools(
+            "analyze_combined", {}, "system prompt", "user prompt", FetchResponse,
+            mcp_names=(),
+        )
+
+    out = capsys.readouterr().out
+    assert "LLM_CALL_FAILED op=analyze_combined kind=timeout" in out
+    assert result.context_updates == []
 
 
 # ---- Per-node iteration overrides ----
