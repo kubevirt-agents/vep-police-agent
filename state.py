@@ -99,6 +99,10 @@ class PRInfo(BaseModel):
     has_approve: bool = False  # Has GitHub approval
     on_hold: bool = False  # Marked as on hold
     review_count: int = 0  # Number of reviews
+    # GitHub label names (e.g. "do-not-merge/hold", "lifecycle/rotten",
+    # "needs-rebase"). Populated for implementation PRs from the PRs index -
+    # blocking labels feed the "implementation is demonstrably blocked" guard.
+    labels: list[str] = []
 
     # Grounded conversation signals (see services.indexer.derive_pr_conversation_signals):
     # reviews, approved_count, changes_requested_count, changes_requested_unaddressed,

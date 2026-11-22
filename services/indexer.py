@@ -22,14 +22,17 @@ CACHE_FILE = Path(__file__).parent.parent / "cache" / "index_cache.json"
 
 # Bot logins excluded from human-activity staleness / last-comment attribution
 # when grounding reviewer sentiment (see derive_pr_conversation_signals).
-BOT_LOGINS = {"kubevirt-bot", "k8s-ci-robot"}
+# kubevirt-commenter-bot is the lifecycle bot that applies lifecycle/stale and
+# lifecycle/rotten labels - counting its comments as human activity makes a
+# rotten PR look freshly active. kubevirt-prow is the CI bot.
+BOT_LOGINS = {"kubevirt-bot", "k8s-ci-robot", "kubevirt-prow", "kubevirt-commenter-bot"}
 
 
 def _is_bot_login(login: str | None) -> bool:
-    """Return True if login is a known bot account (exact match or *[bot])."""
+    """Return True if login is a known bot account (exact match or bot suffixes)."""
     if not login:
         return False
-    return login in BOT_LOGINS or login.endswith("[bot]")
+    return login in BOT_LOGINS or login.endswith(("[bot]", "-bot"))
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:

@@ -94,6 +94,73 @@ def _classify_effective_impl_prs(vep, release_cutoff: datetime | None) -> list[P
     return impl_prs
 
 
+def _is_blocking_label(label: str) -> bool:
+    """Return True if a PR label blocks merging (hold, rotten, needs-rebase)."""
+    return (
+        label.startswith("do-not-merge/")
+        or label == "lifecycle/rotten"
+        or label == "needs-rebase"
+    )
+
+
+def _days_since(timestamp: str | None, now: datetime) -> int | None:
+    """Days between an ISO timestamp and `now`, or None if unparsable."""
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return max(0, (now - parsed).days)
+
+
+def _impl_pr_summary(vep, release_cutoff: datetime | None) -> list[dict[str, Any]]:
+    """Compact current-release impl-PR view for the design-phase LLM context.
+
+    Full implementation_prs are stripped during design phase (impl completeness
+    is not judged there), but the "Already-designed and landed work" rule still
+    needs impl BLOCKERS visible: a targeted stage whose implementation PRs are
+    on hold/rotten or stalled is not healthy, and the model must be able to
+    apply that guard. Each entry carries the guard-relevant fields only.
+    """
+    now = datetime.now(UTC)
+    summary = []
+    for pr in _classify_effective_impl_prs(vep, release_cutoff):
+        conversation = pr.conversation or {}
+        last_commit_at = conversation.get("last_commit_pushed_at")
+        summary.append({
+            "number": pr.number,
+            "title": pr.title,
+            "state": pr.state,
+            "blocking_labels": [l for l in (pr.labels or []) if _is_blocking_label(l)],
+            "days_since_last_commit": _days_since(last_commit_at, now),
+            "days_since_last_human_activity": conversation.get("days_since_last_human_activity"),
+            "last_activity_author": conversation.get("last_comment_author"),
+            "recent_activity_bot_only": _is_bot_only_activity(conversation),
+            "approved_count": conversation.get("approved_count", 0),
+            "changes_requested_unaddressed": conversation.get("changes_requested_unaddressed", False),
+        })
+    return summary
+
+
+def _is_bot_only_activity(conversation: dict[str, Any]) -> bool:
+    """True when the freshest recorded activity on a PR is bot-authored.
+
+    A lifecycle bot (kubevirt-commenter-bot) commenting on an otherwise silent
+    PR is the rotten/stale marker itself, not human activity - fetch-time
+    staleness figures may predate the bot-login filter and count it as human.
+    """
+    author = conversation.get("last_comment_author")
+    if not author:
+        return False
+    return (
+        author.endswith(("[bot]", "-bot"))
+        or author in ("kubevirt-prow", "k8s-ci-robot", "kubevirt-bot")
+    )
+
+
 def _compute_staleness(vep) -> dict[str, Any]:
     """Derive a staleness dict, preferring grounded WS3 conversation data.
 
@@ -486,6 +553,10 @@ INPUT: Each VEP has raw context data from fetch nodes:
 - context.compliance: {{pr_state, has_lgtm, has_approved_label, sig_labels, implementation_prs, template sections}}
 - context.exceptions: {{exception_issue_number, exception_issue_state, has_post_ef_commits, has_post_cf_commits}}
 - context.phase_risks: {{has_risks, phase, proposal_pr, stale_impl_prs, missing_impl_prs, days_to_deadline, risk_level}}
+- During the design phase each VEP carries "impl_pr_summary" instead of implementation_prs:
+  its current-release impl PRs reduced to {{number, title, state, blocking_labels, staleness}}.
+  Use it ONLY for the blocked-implementation guard (see RELEASE-AWARENESS in the user
+  prompt) - never to judge implementation completeness during design.
 - Each PR (enhancement_prs / implementation_prs) carries a "conversation" dict when enriched:
   reviews, approved_count, changes_requested_count, changes_requested_unaddressed, unaddressed_by,
   last_comment_author, last_comment_date, days_since_last_human_activity, last_commit_pushed_at.
@@ -615,11 +686,15 @@ and issue category - consolidate related issues into a single alert."""
         release_schedule = state.get("release_schedule")
         # Strip raw board impl_prs from LLM context to prevent backport PR leaks.
         # The filtered implementation_prs field is the authoritative source.
+        # During design phase, full implementation_prs are also stripped (impl
+        # completeness is not judged there) but replaced with a compact
+        # impl_pr_summary so the blocked-implementation guard stays applicable.
         veps_data = []
         for vep in batch_veps:
             d = vep.model_dump(mode='json')
             if release_phase == "design":
                 d.pop("implementation_prs", None)
+                d["impl_pr_summary"] = _impl_pr_summary(vep, release_cutoff)
             board = d.get("board_fields")
             if isinstance(board, dict):
                 board.pop("impl_prs", None)
@@ -665,12 +740,32 @@ For EVERY VEP (skip any with "_deterministic_attention" in analysis):
 RELEASE-AWARENESS: PRs merged before the cycle start date ({cycle_start_str or 'unknown'})
 are PREVIOUS-RELEASE work, not current-release progress. Ignore previous-release PRs when
 judging completeness - only current-release PRs matter.
-During design phase, implementation PRs are IRRELEVANT - judge by proposal PR status only.
-Note: implementation_prs are intentionally stripped from VEP data during design phase.
+EXCEPTION: a proposal merged or approved before the cycle start still covers the design
+requirement for the stage it targeted (governance model, "Already-designed and landed
+work") - a newly opened proposal PR is not required once the targeted stage's design is
+merged/approved. That shortcut is VOID whenever either guard fails:
+(a) STAGE GAP: the cycle targets a stage NEWER than the merged designs - e.g. designs
+    merged a Beta graduation but the cycle target is GA. Infer the targeted stage from
+    proposal PR titles, the tracking issue's stage/timeline body, and impl PR titles
+    (a "graduate X to GA" impl PR means GA is the target). Earlier-stage merges do NOT
+    cover the new stage: if no open or merged proposal defines the new stage's
+    requirements, flag the gap.
+(b) BLOCKED IMPL: the targeted stage's implementation is demonstrably blocked - an open
+    current-release impl PR with blocking labels (do-not-merge/*, lifecycle/rotten,
+    needs-rebase) in impl_pr_summary, or stalled (no commits for a month+, no approvals,
+    bot-only activity). Bot accounts are NOT human activity: a recent comment by a
+    lifecycle bot (e.g. kubevirt-commenter-bot applying lifecycle/rotten) on an otherwise
+    silent PR is itself a blocker signal, not freshness.
+During design phase, do NOT judge implementation completeness and do NOT expect impl PRs
+to exist - but impl PR blockers still count via guard (b). Each VEP's impl_pr_summary
+lists its current-release impl PRs exactly for that guard; full implementation_prs are
+intentionally stripped from VEP data during design phase.
 
 For VEPs where ALL current-release implementation PRs are merged (or the VEP itself is
 merged / we are past the relevant freeze): attention_level = "ok" - these VEPs are on
-track or fully landed.
+track or fully landed. This shortcut never overrides guard (b): an open impl PR with
+blocking labels, or stalled for months with bot-only activity, means the work is NOT
+landed - such a VEP is at least "watch".
 
 For ALL VEPs:
 10. Generate alerts for issues needing attention.
