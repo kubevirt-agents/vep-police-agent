@@ -1,7 +1,7 @@
 """Configuration values for VEP governance agent."""
 
 
-from .util import FAST_MODEL, HEAVY_MODEL
+from .util import FAST_MODEL, HEAVY_MODEL, _env_int
 
 # Default release version (used when release cannot be auto-detected)
 DEFAULT_RELEASE: str = "v1.9"
@@ -53,4 +53,14 @@ FETCH_VEPS_INTERVAL_SECONDS: int = 12 * 60 * 60  # 12 hours
 # LLM rate limit retry configuration
 LLM_MAX_RETRIES: int = 3
 LLM_INITIAL_DELAY: int = 2  # seconds
-LLM_MAX_TIMEOUT: int = 180  # seconds - abort if exceeded
+
+# Per-tier LLM call settings (tier resolved by node name, see util.HEAVY_NODES)
+LLM_TIMEOUT_FAST: int = _env_int("LLM_TIMEOUT_FAST", 300)  # seconds
+LLM_TIMEOUT_HEAVY: int = _env_int("LLM_TIMEOUT_HEAVY", 900)  # seconds
+# Output token cap per call; thinking tokens count against it.
+LLM_MAX_OUTPUT_TOKENS: int = _env_int("LLM_MAX_OUTPUT_TOKENS", 65536)
+# SDK-level retries per call. Kept low because wrapper-level retries
+# multiply into wall time.
+LLM_SDK_MAX_RETRIES: int = _env_int("LLM_SDK_MAX_RETRIES", 1)
+# Wrapper-level retries on call timeout (on top of the first attempt).
+LLM_TIMEOUT_RETRIES: int = _env_int("LLM_TIMEOUT_RETRIES", 1)

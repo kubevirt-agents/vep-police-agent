@@ -266,6 +266,13 @@ Override models via environment variables:
 - `HEAVY_MODEL` (default: `gemini-3.1-pro-preview`)
 - `DEFAULT_MODEL` (default: same as `FAST_MODEL`)
 
+The tier is resolved by node name (heavy: `analyze_combined`, `update_sheets`, `alert_summary`; everything else fast), not by model name, so single-model setups work.
+
+Other LLM settings (all env-overridable):
+- `LLM_TIMEOUT_FAST` (default: `300`) / `LLM_TIMEOUT_HEAVY` (default: `900`) - per-call timeout in seconds; the SDK aborts the HTTP call itself (surfacing as 504 DEADLINE_EXCEEDED) and the wrapper retries a timeout at most once, client-side or server-side alike
+- `LLM_MAX_OUTPUT_TOKENS` (default: `65536`) - output token cap per call (thinking tokens count against it)
+- `LLM_SDK_MAX_RETRIES` (default: `1`) - SDK-level retries per call, kept low so they don't multiply with wrapper retries
+
 Use `--fastest-model` to force Flash everywhere for testing.
 
 ### Google Sheets

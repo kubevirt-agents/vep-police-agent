@@ -2,67 +2,153 @@
 
 import concurrent.futures
 import json
+import re
 import time
 from typing import Any, TypeVar
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
-from config.config import LLM_INITIAL_DELAY, LLM_MAX_RETRIES, LLM_MAX_TIMEOUT
+from config.config import (
+    LLM_INITIAL_DELAY,
+    LLM_MAX_OUTPUT_TOKENS,
+    LLM_MAX_RETRIES,
+    LLM_TIMEOUT_RETRIES,
+)
 from services.mcp_factory import get_mcp_tools_by_name
 from services.utils import get_model, log
 
 T = TypeVar('T', bound=BaseModel)
 
 
-def _invoke_with_timeout(llm, messages, timeout_seconds):
-    """Invoke LLM with a per-call timeout to prevent indefinite hangs."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(llm.invoke, messages)
+# Server-side deadline error: the SDK timeout aborts the HTTP call, which the
+# Google API surfaces as "504 DEADLINE_EXCEEDED" rather than a client-side
+# TimeoutError. Word-boundary match so PR numbers like 5043 do not hit.
+_DEADLINE_ERROR_RE = re.compile(r"\b504\b|DEADLINE_EXCEEDED")
+
+
+def _is_deadline_exceeded(e: BaseException) -> bool:
+    """True for server-side deadline errors (504 / DEADLINE_EXCEEDED)."""
+    return bool(_DEADLINE_ERROR_RE.search(str(e)))
+
+
+def _invoke_with_timeout(llm, messages, timeout_seconds: int):
+    """Invoke LLM with a per-call timeout backstop.
+
+    The SDK-side timeout (set in get_model) is the real abort; this wrapper
+    only guards against a hung SDK call. On timeout the executor is abandoned
+    (shutdown(wait=False, cancel_futures=True)) so a retry starts immediately
+    instead of waiting out the hung call.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(llm.invoke, messages)
+    try:
         return future.result(timeout=timeout_seconds)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _invoke_with_retry(llm, messages, operation_type: str):
+def _invoke_with_retry(llm, messages, operation_type: str, timeout_seconds: int):
     """Invoke LLM with per-call timeout and exponential backoff on retriable errors.
 
-    Retriable errors: rate limits (429/RESOURCE_EXHAUSTED) and call timeouts.
-    Returns the LLM response or raises if max retries/timeout exceeded.
+    Retriable errors: rate limits (429/RESOURCE_EXHAUSTED, up to LLM_MAX_RETRIES
+    retries, with the tier timeout as the total budget) and call timeouts (at
+    most LLM_TIMEOUT_RETRIES retries). A timeout counts whether it aborts
+    client-side (TimeoutError) or server-side (504 DEADLINE_EXCEEDED).
+    Returns the LLM response or raises if retries are exhausted.
     """
     start_time = time.time()
     delay = LLM_INITIAL_DELAY
+    timeout_retries = 0
+    rate_limit_retries = 0
 
-    for attempt in range(LLM_MAX_RETRIES + 1):
-        try:
-            return _invoke_with_timeout(llm, messages, LLM_MAX_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            elapsed = time.time() - start_time
-            if attempt >= LLM_MAX_RETRIES:
-                log(f"LLM call timed out after {LLM_MAX_TIMEOUT}s, max retries exceeded",
-                    node=operation_type, level="ERROR")
-                raise
-            log(f"LLM call timed out after {LLM_MAX_TIMEOUT}s, retrying in {delay}s "
-                f"(attempt {attempt+1}/{LLM_MAX_RETRIES})",
+    def _handle_timeout(reason: str) -> bool:
+        """Shared timeout-retry bookkeeping. Returns True to retry the call."""
+        nonlocal timeout_retries, delay
+        if timeout_retries >= LLM_TIMEOUT_RETRIES:
+            log(f"LLM call {reason} after {timeout_seconds}s, timeout retries exhausted "
+                f"({LLM_TIMEOUT_RETRIES} retry(ies))",
+                node=operation_type, level="ERROR")
+            return False
+        timeout_retries += 1
+        log(f"LLM call {reason} after {timeout_seconds}s, retrying in {delay}s "
+            f"(timeout retry {timeout_retries}/{LLM_TIMEOUT_RETRIES})",
                 node=operation_type, level="WARNING")
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
+        time.sleep(delay)
+        delay = min(delay * 2, 60)
+        return True
+
+    while True:
+        try:
+            return _invoke_with_timeout(llm, messages, timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            if not _handle_timeout("timed out"):
+                raise
         except Exception as e:
+            if _is_deadline_exceeded(e):
+                # The SDK-side timeout aborts the HTTP call, which the API
+                # surfaces as 504 DEADLINE_EXCEEDED instead of a client-side
+                # TimeoutError. Same condition, same handling: the single
+                # timeout retry, then re-raise.
+                if not _handle_timeout("hit a server-side deadline (504)"):
+                    raise
+                continue
             error_str = str(e)
             # Check if it's a rate limit error
             if "RESOURCE_EXHAUSTED" not in error_str and "429" not in error_str:
                 raise  # Not a rate limit error, re-raise immediately
 
+            if rate_limit_retries >= LLM_MAX_RETRIES:
+                log(f"Rate limited {rate_limit_retries} time(s), max retries ({LLM_MAX_RETRIES}) exceeded",
+                    node=operation_type, level="ERROR")
+                raise
+            rate_limit_retries += 1
+
             elapsed = time.time() - start_time
-            if elapsed + delay > LLM_MAX_TIMEOUT:
-                log(f"Rate limit retry would exceed max timeout ({LLM_MAX_TIMEOUT}s), aborting",
+            if elapsed + delay > timeout_seconds:
+                log(f"Rate limit retry would exceed max timeout ({timeout_seconds}s), aborting",
                     node=operation_type, level="ERROR")
                 raise
 
-            log(f"Rate limited, retrying in {delay}s (attempt {attempt+1}/{LLM_MAX_RETRIES})",
+            log(f"Rate limited, retrying in {delay}s (attempt {rate_limit_retries}/{LLM_MAX_RETRIES})",
                 node=operation_type, level="WARNING")
             time.sleep(delay)
             delay = min(delay * 2, 60)  # Cap at 60s per retry
 
-    raise RuntimeError(f"Max retries ({LLM_MAX_RETRIES}) exceeded for {operation_type}")
+
+def _classify_llm_error(e: BaseException) -> str:
+    """Classify an LLM call failure for the LLM_CALL_FAILED log tag."""
+    if isinstance(e, concurrent.futures.TimeoutError) or _is_deadline_exceeded(e):
+        return "timeout"
+    error_str = str(e)
+    if "INVALID_ARGUMENT" in error_str or " 400" in f" {error_str}":
+        return "invalid_argument"
+    return "other"
+
+
+def _structured_output_call(
+    llm, messages, response_model: type[T], operation_type: str, timeout_seconds: int,
+) -> T:
+    """Final structured-output call on the tool-free LLM instance.
+
+    The schema is bound on a tool-free LLM because langchain-google-genai
+    merges the response schema onto any bound tools, and Gemini rejects
+    tools+response_schema in one call (400). include_raw=True keeps the raw
+    AIMessage so its usage can be logged (output tokens count against
+    LLM_MAX_OUTPUT_TOKENS, thinking included).
+    """
+    structured_llm = llm.with_structured_output(response_model, include_raw=True)
+    raw_result = _invoke_with_retry(structured_llm, messages, operation_type, timeout_seconds)
+    result = raw_result.get("parsed")
+    parsing_error = raw_result.get("parsing_error")
+    if result is None or parsing_error is not None:
+        raise ValueError(f"Structured output parsing failed for {operation_type}: {parsing_error}")
+    usage = getattr(raw_result.get("raw"), "usage_metadata", None)
+    if isinstance(usage, dict) and usage.get("output_tokens") is not None:
+        log(f"LLM_CALL_USAGE op={operation_type} input_tokens={usage.get('input_tokens')} "
+            f"output_tokens={usage.get('output_tokens')} (output cap {LLM_MAX_OUTPUT_TOKENS})",
+            node=operation_type)
+    return result
 
 
 class NoToolsCalledException(Exception):
@@ -100,7 +186,7 @@ def invoke_llm_with_tools(
     """Invoke LLM with MCP tools using structured output.
 
     Args:
-        operation_type: Type of operation (for logging)
+        operation_type: Type of operation (for logging and model/tier selection)
         state_context: Current state context
         system_prompt: System prompt describing the task
         user_prompt: User prompt with specific instructions
@@ -117,12 +203,19 @@ def invoke_llm_with_tools(
             was attempted, and every attempted tool call failed
     """
     try:
+        # Get model for this operation type (node); the node name also picks
+        # the tier (thinking level, per-call timeout).
+        import config
+        model_name = config.get_model_for_node(operation_type)
+        log(f"Using model {model_name} for {operation_type}", node=operation_type, level="DEBUG")
+        _, timeout_seconds = config.get_llm_settings_for_node(operation_type)
+
         # Get MCP tools
         tools = get_mcp_tools_by_name(*mcp_names)
         mcp_list = ", ".join(mcp_names)
         tool_names = [t.name for t in tools] if tools else []
         log(f"Loaded {len(tools)} MCP tools ({mcp_list}) for {operation_type}: {tool_names}", node=operation_type)
-        
+
         if not tools:
             log(f"No MCP tools available for {operation_type}", node=operation_type, level="ERROR")
             # Return empty response with proper structure
@@ -133,23 +226,19 @@ def invoke_llm_with_tools(
                 log(f"Could not create empty {response_model.__name__}: {e}", node=operation_type, level="WARNING")
                 return response_model()
 
-        # Get model for this operation type (node)
-        import config
-        model_name = config.get_model_for_node(operation_type)
-        log(f"Using model {model_name} for {operation_type}", node=operation_type, level="DEBUG")
+        llm = get_model(model_name=model_name, node=operation_type)
 
         # Create LLM with tools bound
         # Use tool_choice="any" when require_tools is True to force LLM to call at least one tool
-        llm = get_model(model_name=model_name)
         if require_tools:
             llm_with_tools = llm.bind_tools(tools, tool_choice="any")
             log("Tool choice set to 'any' - forcing LLM to use tools", node=operation_type, level="DEBUG")
         else:
             llm_with_tools = llm.bind_tools(tools)
-        
+
         # Build messages
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-        
+
         # First, handle tool calls (if any) - do this without structured output
         # Check for debug mode that limits iterations
         import os
@@ -167,7 +256,7 @@ def invoke_llm_with_tools(
         while iteration < max_iterations:
             iteration += 1
             log(f"Invoking LLM for {operation_type} (iteration {iteration}/{max_iterations})...", node=operation_type)
-            response = _invoke_with_retry(llm_with_tools, messages, operation_type)
+            response = _invoke_with_retry(llm_with_tools, messages, operation_type, timeout_seconds)
             log(f"LLM invocation completed for {operation_type} (iteration {iteration})", node=operation_type, level="DEBUG")
 
             # Check if response has tool calls
@@ -231,14 +320,10 @@ def invoke_llm_with_tools(
 
         # Now get structured output with final messages (including tool results)
         messages.append(HumanMessage(content="Based on the information gathered, please provide your response in the required structured format."))
-        # Bind the schema on the TOOL-FREE llm: langchain-google-genai merges the
-        # response schema onto any bound tools, and Gemini rejects tools+response_schema
-        # in one call (400). The tool loop is done, so no tools are needed here.
         log(f"Requesting structured output for {operation_type}...", node=operation_type, level="DEBUG")
-        structured_llm = llm.with_structured_output(response_model)
-        result = _invoke_with_retry(structured_llm, messages, operation_type)
+        result = _structured_output_call(llm, messages, response_model, operation_type, timeout_seconds)
         log(f"Structured output received for {operation_type}", node=operation_type, level="DEBUG")
-        
+
         # Response is already a validated Pydantic model!
         log(f"Successfully received structured response for {operation_type}", node=operation_type)
 
@@ -267,7 +352,10 @@ def invoke_llm_with_tools(
         # being swallowed by the generic fallback below.
         raise
     except Exception as e:
-        log(f"Error invoking LLM for {operation_type}: {e}", node=operation_type, level="ERROR")
+        # Loud failure tag: 400 INVALID_ARGUMENT usually means context length
+        # or schema problems - make those trivially greppable before falling back.
+        log(f"LLM_CALL_FAILED op={operation_type} kind={_classify_llm_error(e)}: {e}",
+            node=operation_type, level="ERROR")
         import traceback
         log(f"Traceback: {traceback.format_exc()}", node=operation_type, level="ERROR")
         # Return empty response with proper structure
@@ -307,7 +395,7 @@ def invoke_llm_with_tools(
                                 defaults[field_name] = False
                             else:
                                 defaults[field_name] = None
-                
+
                 return response_model(**defaults)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError) as final_error:
                 log(f"Could not create {response_model.__name__} with defaults: {final_error}", node=operation_type, level="ERROR")
