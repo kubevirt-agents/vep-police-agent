@@ -1351,6 +1351,14 @@ def index_enhancements_prs(days_back: int | None = 365, fetch_reviews: bool = Tr
             prs = []
             if all_pr_items:
                 prs_result = all_pr_items
+            if not isinstance(prs_result, list):
+                # Tool error / unexpected shape: without this the isinstance
+                # guard below is skipped, the function falls through without
+                # hitting "return prs", and returns None (crashes len() in
+                # create_indexed_context).
+                log("Enhancements PR listing returned no usable list; treating as empty",
+                    node="indexer", level="WARNING")
+                prs_result = []
             if isinstance(prs_result, list):
                 for pr in prs_result:
                     if not isinstance(pr, dict):
