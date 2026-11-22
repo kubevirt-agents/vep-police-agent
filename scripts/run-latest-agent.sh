@@ -68,12 +68,18 @@ fi
 CMD_ARGS+=("${FORWARD_ARGS[@]}")
 
 # Build podman run flags - detached/named for production deploys, foreground otherwise
+# A detached container without a name gets a random one, runs forever, and no
+# deploy can find it to stop it (this leaked 12 stale instances on the host).
 PODMAN_FLAGS=(--rm --pull=newer)
 if [ "$DETACH_MODE" = true ]; then
+    if [ -z "$CONTAINER_NAME" ]; then
+        echo "ERROR: --detach requires --container-name; an unnamed detached container is untrackable and leaks" >&2
+        exit 1
+    fi
     PODMAN_FLAGS+=(--detach --log-driver=journald)
 fi
 if [ -n "$CONTAINER_NAME" ]; then
-    PODMAN_FLAGS+=(--name "$CONTAINER_NAME")
+    PODMAN_FLAGS+=(--name "$CONTAINER_NAME" --replace)
 fi
 
 # Execute the command
