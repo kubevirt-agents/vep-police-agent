@@ -1,7 +1,7 @@
 """Configuration values for VEP governance agent."""
 
 
-from .util import FAST_MODEL, HEAVY_MODEL
+from .util import FAST_MODEL, HEAVY_MODEL, _env_bool, _env_int
 
 # Default release version (used when release cannot be auto-detected)
 DEFAULT_RELEASE: str = "v1.9"
@@ -27,7 +27,7 @@ NODE_MODELS: dict[str, str] = {
     "update_sheets": HEAVY_MODEL,
     "alert_summary": HEAVY_MODEL,  # Generates summary-style notifications
 
-    # Context fetch nodes - use fast model (Flash) to fetch data via GitHub MCP
+    # Context fetch nodes - use fast model to fetch data via GitHub MCP
     # These nodes ONLY fetch raw data, NO analysis - analysis is done by analyze_combined
     "fetch_veps": FAST_MODEL,
     "check_activity": FAST_MODEL,
@@ -53,4 +53,35 @@ FETCH_VEPS_INTERVAL_SECONDS: int = 12 * 60 * 60  # 12 hours
 # LLM rate limit retry configuration
 LLM_MAX_RETRIES: int = 3
 LLM_INITIAL_DELAY: int = 2  # seconds
-LLM_MAX_TIMEOUT: int = 180  # seconds - abort if exceeded
+
+# Per-tier LLM call settings (tier resolved by node name, see util.HEAVY_NODES)
+LLM_TIMEOUT_FAST: int = _env_int("LLM_TIMEOUT_FAST", 300)  # seconds
+LLM_TIMEOUT_HEAVY: int = _env_int("LLM_TIMEOUT_HEAVY", 900)  # seconds
+# Output token cap per call; thinking tokens count against it.
+LLM_MAX_OUTPUT_TOKENS: int = _env_int("LLM_MAX_OUTPUT_TOKENS", 65536)
+# SDK-level retries per call. Kept low because wrapper-level retries
+# multiply into wall time.
+LLM_SDK_MAX_RETRIES: int = _env_int("LLM_SDK_MAX_RETRIES", 1)
+# Wrapper-level retries on call timeout (on top of the first attempt).
+LLM_TIMEOUT_RETRIES: int = _env_int("LLM_TIMEOUT_RETRIES", 1)
+
+# Fetch-loop context budget (input tokens). Past the budget the tool loop
+# stops and the node answers with the data gathered so far; past the hard
+# cap the newest tool results are also shrunk so the final call fits the
+# model's context window.
+FETCH_TOOL_RESULT_MAX_CHARS: int = _env_int("FETCH_TOOL_RESULT_MAX_CHARS", 20000)
+FETCH_INPUT_TOKEN_BUDGET: int = _env_int("FETCH_INPUT_TOKEN_BUDGET", 650000)
+FETCH_INPUT_TOKEN_HARD_CAP: int = _env_int("FETCH_INPUT_TOKEN_HARD_CAP", 900000)
+
+# analyze_combined: bind GitHub tools (True) or make a direct structured-output
+# call with no tools and no MCP server (False, default).
+ANALYZE_USE_TOOLS: bool = _env_bool("ANALYZE_USE_TOOLS", False)
+# alert_summary: use the LLM formatting path (True) or the deterministic
+# fallback summary (False, default - the historical behaviour).
+ALERT_SUMMARY_USE_LLM: bool = _env_bool("ALERT_SUMMARY_USE_LLM", False)
+
+# Per-node tool-loop iteration overrides. Default is 30 for fetch_veps and
+# 10 for everything else (5 in the "test-sheets" debug mode).
+NODE_MAX_ITERATIONS: dict[str, int] = {
+    "check_compliance": 20,
+}

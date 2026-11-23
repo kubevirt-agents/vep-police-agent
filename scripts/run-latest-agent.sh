@@ -82,11 +82,41 @@ if [ -n "$CONTAINER_NAME" ]; then
     PODMAN_FLAGS+=(--name "$CONTAINER_NAME" --replace)
 fi
 
+# Forward an allowlist of tuning env vars into the container when set on the
+# host (e.g. via ~/.config/<project>/env sourced by the deploy wrapper).
+# podman passes nothing from the host environment by default, so each var
+# must be forwarded explicitly. Unset vars are skipped.
+FORWARD_ENV_VARS=(
+    FAST_MODEL
+    HEAVY_MODEL
+    DEFAULT_MODEL
+    FAST_THINKING_LEVEL
+    HEAVY_THINKING_LEVEL
+    LLM_TIMEOUT_FAST
+    LLM_TIMEOUT_HEAVY
+    LLM_TIMEOUT_RETRIES
+    LLM_SDK_MAX_RETRIES
+    LLM_MAX_OUTPUT_TOKENS
+    FETCH_INPUT_TOKEN_BUDGET
+    FETCH_INPUT_TOKEN_HARD_CAP
+    FETCH_TOOL_RESULT_MAX_CHARS
+    ANALYZE_USE_TOOLS
+    ALERT_SUMMARY_USE_LLM
+)
+ENV_FLAGS=()
+for var in "${FORWARD_ENV_VARS[@]}"; do
+    value="${!var}"
+    if [ -n "$value" ]; then
+        ENV_FLAGS+=(-e "$var=$value")
+    fi
+done
+
 # Execute the command
 # Set PYTHONUNBUFFERED=1 to ensure logs are flushed immediately (important for real-time log viewing)
 # Mount workspace as read-only, but cache directory as read-write for persistence
 podman run "${PODMAN_FLAGS[@]}" \
     -e PYTHONUNBUFFERED=1 \
+    "${ENV_FLAGS[@]}" \
     --network=host \
     -v "$PROJECT_ROOT:/workspace:ro" \
     -v "$PROJECT_ROOT/cache:/workspace/cache:rw" \

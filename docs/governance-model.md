@@ -49,6 +49,35 @@ urgent at 90% through Implementation than at 10%.
 | Stabilization | impl merged; docs/tests landing | impl unmerged (won't make it); no exception requested |
 | Any | reviews addressed, activity recent | stale / going-nowhere; negative reviewer sentiment |
 
+### Already-designed and landed work
+
+The playbook rows above describe a VEP moving through the cycle. A VEP can
+also be nearly done, or fully done, relative to this cycle's target when the
+cycle starts (graduations, carry-overs). Judge those against the targeted
+stage, not against whether a proposal PR is currently open:
+
+- "Proposal PR exists & under review" includes proposals already **merged or
+  approved**. What matters is that a proposal covers the cycle's **targeted
+  stage** - the stage this cycle is graduating to (read the PR titles, the
+  issue's stage/timeline, and impl PR titles - e.g. a "graduate X to GA" impl
+  PR means GA is the target - not just "some proposal merged"). When the
+  targeted stage's design is merged or approved, "no open proposal PR" is not
+  a problem: the VEP is healthy (no attention) unless the implementation is
+  demonstrably blocked or stalled (rotten/hold/needs-rebase labels,
+  unaddressed change requests, weeks of silence). Bot activity is not human
+  activity: a lifecycle bot commenting on an otherwise silent PR is itself a
+  staleness/blocker marker. Implementation not having started yet is normal
+  during the Design phase.
+- A design merged before the cycle start still covers the stage it targeted.
+  This does **not** extend to a VEP targeting a **new** stage this cycle
+  (e.g. Beta to GA): earlier-stage merges do not cover the new stage's
+  requirements. If no open or merged proposal defines the targeted stage's
+  requirements, that is a real gap - flag it.
+- Leftover hygiene from landed work - missing labels on the tracking issue,
+  stale status fields, the VEP still sitting on the board after completion -
+  is a cleanup note (at most "watch"), not needs-attention, once the
+  targeted stage has landed.
+
 ## Policy & compliance checklist
 
 Enumerated from `kubevirt/enhancements` (feature-lifecycle, templates, README

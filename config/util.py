@@ -3,10 +3,38 @@
 import os
 
 # Model tier constants for node configuration (overridable via env vars)
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
-HEAVY_MODEL = os.getenv("HEAVY_MODEL", "gemini-3.1-pro-preview")
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-4-hydrogen")
+HEAVY_MODEL = os.getenv("HEAVY_MODEL", "gemini-4-neon")
+
+# Thinking level per tier; "" = model default.
+FAST_THINKING_LEVEL = os.getenv("FAST_THINKING_LEVEL", "low")
+HEAVY_THINKING_LEVEL = os.getenv("HEAVY_THINKING_LEVEL", "medium")
 
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", FAST_MODEL)
+
+# Nodes on the heavy tier (powerful model, deeper thinking, longer timeout).
+# Everything else is fast tier. The tier is resolved by node name, NOT by
+# model name, so a config where FAST_MODEL == HEAVY_MODEL still works.
+HEAVY_NODES = frozenset({"analyze_combined", "update_sheets", "alert_summary"})
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to the default on missing/invalid values."""
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a bool env var ("1", "true", "yes" - case-insensitive - mean True)."""
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in ("1", "true", "yes")
 
 AVAILABLE_MODELS = [
     FAST_MODEL,
@@ -34,6 +62,23 @@ def get_model_for_node(node_name: str) -> str:
     if _USE_FASTEST_MODEL:
         return FAST_MODEL
     return NODE_MODELS.get(node_name, DEFAULT_MODEL)
+
+
+def get_tier_for_node(node_name: str | None) -> str:
+    """Resolve the LLM tier ("heavy" or "fast") for a node/operation name."""
+    return "heavy" if node_name in HEAVY_NODES else "fast"
+
+
+def get_llm_settings_for_node(node_name: str | None) -> tuple[str | None, int]:
+    """Return (thinking_level, timeout_seconds) for a node/operation name.
+
+    thinking_level is None when the tier's configured level is "" (model
+    default). The timeout is the per-tier call timeout in seconds.
+    """
+    from .config import LLM_TIMEOUT_FAST, LLM_TIMEOUT_HEAVY
+    if get_tier_for_node(node_name) == "heavy":
+        return HEAVY_THINKING_LEVEL or None, LLM_TIMEOUT_HEAVY
+    return FAST_THINKING_LEVEL or None, LLM_TIMEOUT_FAST
 
 
 def set_node_model(node_name: str, model: str) -> None:

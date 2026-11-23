@@ -68,24 +68,34 @@ def invoke_agent(agent: CompiledStateGraph, prompt: str) -> str:
     # Handle string content directly
     return str(content) if content is not None else ""
 
-def get_model(model_name: str | None = None):
+def get_model(model_name: str | None = None, node: str | None = None):
     """Get the LLM model instance.
-    
+
     Args:
         model_name: Optional model name. If not provided, uses default from config.
-    
-    No timeout is set - requests will complete naturally without artificial time limits.
+        node: Optional node/operation name. Resolves the tier, which picks the
+            thinking level and per-call timeout (config.get_llm_settings_for_node).
+
+    The SDK-side timeout aborts the HTTP call itself; the executor wrapper in
+    llm_helper is only a backstop. max_output_tokens caps output (thinking
+    tokens count against it) and max_retries is kept low to avoid multiplying
+    wall time with the wrapper-level retries.
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     import config
-    
+
     if model_name is None:
         model_name = config.DEFAULT_MODEL
+    thinking_level, timeout = config.get_llm_settings_for_node(node)
 
     return ChatGoogleGenerativeAI(
         model=model_name,
         api_key=get_api_key(),
+        thinking_level=thinking_level,
+        timeout=timeout,
+        max_output_tokens=config.LLM_MAX_OUTPUT_TOKENS,
+        max_retries=config.LLM_SDK_MAX_RETRIES,
     )
 
 

@@ -22,14 +22,17 @@ CACHE_FILE = Path(__file__).parent.parent / "cache" / "index_cache.json"
 
 # Bot logins excluded from human-activity staleness / last-comment attribution
 # when grounding reviewer sentiment (see derive_pr_conversation_signals).
-BOT_LOGINS = {"kubevirt-bot", "k8s-ci-robot"}
+# kubevirt-commenter-bot is the lifecycle bot that applies lifecycle/stale and
+# lifecycle/rotten labels - counting its comments as human activity makes a
+# rotten PR look freshly active. kubevirt-prow is the CI bot.
+BOT_LOGINS = {"kubevirt-bot", "k8s-ci-robot", "kubevirt-prow", "kubevirt-commenter-bot"}
 
 
 def _is_bot_login(login: str | None) -> bool:
-    """Return True if login is a known bot account (exact match or *[bot])."""
+    """Return True if login is a known bot account (exact match or bot suffixes)."""
     if not login:
         return False
-    return login in BOT_LOGINS or login.endswith("[bot]")
+    return login in BOT_LOGINS or login.endswith(("[bot]", "-bot"))
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -1351,6 +1354,14 @@ def index_enhancements_prs(days_back: int | None = 365, fetch_reviews: bool = Tr
             prs = []
             if all_pr_items:
                 prs_result = all_pr_items
+            if not isinstance(prs_result, list):
+                # Tool error / unexpected shape: without this the isinstance
+                # guard below is skipped, the function falls through without
+                # hitting "return prs", and returns None (crashes len() in
+                # create_indexed_context).
+                log("Enhancements PR listing returned no usable list; treating as empty",
+                    node="indexer", level="WARNING")
+                prs_result = []
             if isinstance(prs_result, list):
                 for pr in prs_result:
                     if not isinstance(pr, dict):

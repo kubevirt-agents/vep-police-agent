@@ -11,6 +11,8 @@ from state import VEPState
 
 # Cache file location (in project root)
 CACHE_FILE = Path(__file__).parent.parent / "cache" / "state_cache.json"
+# Subset runs (--veps) write here instead, so prod's cache is not polluted
+SUBSET_CACHE_FILE = Path(__file__).parent.parent / "cache" / "state_cache_subset.json"
 
 
 def save_state_cache_node(state: VEPState) -> Any:
@@ -25,9 +27,14 @@ def save_state_cache_node(state: VEPState) -> Any:
     - current_release: Current release string
     - general_insights: List of insights from analysis
     - alerts: List of alert dicts
+
+    --veps subset runs write to a separate cache file and skip the history
+    snapshot, so the next full run does not diff against a subset state.
     """
     last_check_times = state.get("last_check_times", {})
     last_check_times["save_state_cache"] = datetime.now(UTC)
+
+    vep_filter = state.get("vep_filter") or []
 
     try:
         veps = state.get("veps", [])
@@ -61,13 +68,18 @@ def save_state_cache_node(state: VEPState) -> Any:
             "alerts": state.get("alerts", []),
         }
 
-        with open(CACHE_FILE, "w") as f:
+        cache_file = SUBSET_CACHE_FILE if vep_filter else CACHE_FILE
+        with open(cache_file, "w") as f:
             json.dump(cache_data, f, indent=2, default=str)
 
-        log(f"State cache saved to {CACHE_FILE} ({len(serialized_veps)} VEPs)", node="save_state_cache")
+        log(f"State cache saved to {cache_file} ({len(serialized_veps)} VEPs)", node="save_state_cache")
 
-        # Also save a timestamped snapshot for historical tracking
-        save_snapshot(cache_data)
+        # Also save a timestamped snapshot for historical tracking - but never
+        # for subset runs (history is the diff base for detect_changes).
+        if vep_filter:
+            log("VEP subset run: skipping history snapshot", node="save_state_cache")
+        else:
+            save_snapshot(cache_data)
 
     except (ValueError, TypeError, OSError, KeyError, json.JSONDecodeError) as e:
         log(f"Failed to save state cache: {e}", node="save_state_cache", level="ERROR")

@@ -75,6 +75,42 @@ def _parse_target_release_from_file(vep_file_content: str) -> str | None:
     return None
 
 
+def _filter_veps(discovered_veps: list, vep_filter: list[str]) -> list:
+    """Keep only the VEPs named by --veps tokens (debug subset).
+
+    Tokens are tracking issue numbers ("491") or VEP names ("vep-0491",
+    "VEP 491"). Returns the filtered list; logs what was kept so a subset
+    run is visible in the logs.
+    """
+    filter_ids: set[int] = set()
+    filter_names: set[str] = set()
+    for token in vep_filter:
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            filter_ids.add(int(token))
+            continue
+        name = _extract_vep_number_from_text(token)
+        if name:
+            filter_names.add(name)
+            filter_ids.add(int(name.removeprefix("vep-")))
+        else:
+            log(f"Could not parse VEP filter token: {token!r} (expected '491' or 'vep-0491')",
+                node="fetch_veps", level="WARNING")
+
+    kept = [
+        vep for vep in discovered_veps
+        if vep.tracking_issue_id in filter_ids or vep.name in filter_names
+    ]
+    log(f"VEP filter active: kept {len(kept)}/{len(discovered_veps)} VEP(s) "
+        f"(filter: {', '.join(t.strip() for t in vep_filter if t.strip())})",
+        node="fetch_veps", level="WARNING")
+    if not kept:
+        log("VEP filter matched no VEPs", node="fetch_veps", level="WARNING")
+    return kept
+
+
 def _create_vep_from_board_item(
     issue_number: int,
     board_vep: dict[str, Any],
@@ -333,6 +369,7 @@ def fetch_veps_node(state: VEPState) -> Any:
                             pr.merged_at = datetime.fromisoformat(pr_data["merged_at"])
                         except (ValueError, AttributeError):
                             pass
+                    pr.labels = [l for l in (pr_data.get("labels") or []) if isinstance(l, str)]
                     pr.conversation = pr_data.get("conversation") or {}
                     enriched_impl_prs.append(pr)
                 else:
@@ -381,6 +418,7 @@ def fetch_veps_node(state: VEPState) -> Any:
                             updated_at=updated,
                             author=pr_data.get("author") or "unknown",
                             merged_at=merged_at,
+                            labels=[l for l in (pr_data.get("labels") or []) if isinstance(l, str)],
                             conversation=pr_data.get("conversation") or {},
                         )
                         vep_info.implementation_prs.append(pr)
@@ -426,12 +464,14 @@ def fetch_veps_node(state: VEPState) -> Any:
                             merged_at = datetime.fromisoformat(pr_data["merged_at"])
                     except (ValueError, AttributeError):
                         pass
-                    # vep_to_pr_mappings entries lack conversation; fall back to prs_index
+                    # vep_to_pr_mappings entries lack conversation/labels; fall back to prs_index
                     conversation = pr_data.get("conversation")
-                    if not conversation and pr_num:
+                    labels = [l for l in (pr_data.get("labels") or []) if isinstance(l, str)]
+                    if pr_num:
                         idx = kubevirt_prs_by_number.get(pr_num)
                         if idx:
-                            conversation = idx.get("conversation")
+                            conversation = conversation or idx.get("conversation")
+                            labels = labels or [l for l in (idx.get("labels") or []) if isinstance(l, str)]
                     pr = PRInfo(
                         number=pr_num,
                         title=pr_data.get("title", f"PR #{pr_num}"),
@@ -441,6 +481,7 @@ def fetch_veps_node(state: VEPState) -> Any:
                         updated_at=updated,
                         author="unknown",
                         merged_at=merged_at,
+                        labels=labels,
                         conversation=conversation or {},
                     )
                     vep_info.implementation_prs.append(pr)
@@ -529,6 +570,14 @@ def fetch_veps_node(state: VEPState) -> Any:
                 vep_info.current_milestone.all_code_prs_merged = all_merged
             else:
                 vep_info.current_milestone.all_code_prs_merged = False
+
+    # ---- Debug subset filter (--veps) ----
+    # Applied after reconciliation so the filtered VEPs still get fully
+    # reconciled impl-PR lists. Runs on a subset never touch the board,
+    # sheets, or notifications (main.py forces the skip flags).
+    vep_filter = state.get("vep_filter") or []
+    if vep_filter:
+        discovered_veps = _filter_veps(discovered_veps, vep_filter)
 
     # Log summary
     log("="*80, node="fetch_veps")

@@ -17,7 +17,7 @@ from state import VEPState
 def check_compliance_node(state: VEPState) -> Any:
     """Fetch compliance-related context for VEPs.
 
-    This is a FETCH node using lightweight LLM (Flash). It:
+    This is a FETCH node using lightweight LLM. It:
     1. Fetches PR status, reviews, and labels from GitHub
     2. Checks VEP template completeness indicators
     3. Stores raw compliance data in vep.context.compliance

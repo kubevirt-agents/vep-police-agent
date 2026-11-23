@@ -20,20 +20,26 @@ from state import ReleaseSchedule, VEPInfo
 
 # State cache file location
 STATE_CACHE_FILE = Path(__file__).parent / "cache" / "state_cache.json"
+# Separate cache for --veps subset runs, so prod's cache is not polluted
+STATE_CACHE_SUBSET_FILE = Path(__file__).parent / "cache" / "state_cache_subset.json"
 
 
-def load_state_cache() -> dict[str, Any] | None:
+def load_state_cache(cache_file: Path | None = None) -> dict[str, Any] | None:
     """Load cached state from previous run.
+
+    Args:
+        cache_file: Optional cache file path (default: STATE_CACHE_FILE).
 
     Returns:
         Dict with cached state fields if cache exists and is valid, None otherwise
     """
-    if not STATE_CACHE_FILE.exists():
-        log("State cache file not found", node="main")
+    cache_file = cache_file or STATE_CACHE_FILE
+    if not cache_file.exists():
+        log(f"State cache file not found: {cache_file}", node="main")
         return None
 
     try:
-        with open(STATE_CACHE_FILE, "r") as f:
+        with open(cache_file, "r") as f:
             cached = json.load(f)
 
         # Validate cache version
@@ -72,7 +78,7 @@ def load_state_cache() -> dict[str, Any] | None:
         return None
 
 
-def get_initial_state(sheet_id: str | None = None, index_cache_minutes: int = 60, one_cycle: bool = False, skip_monitoring: bool = False, skip_sheets: bool = False, skip_update_board: bool = False, skip_send_email: bool = False, skip_send_slack: bool = False, mock_veps: bool = False, mock_analyzed_combined: bool = False, mock_alert_summary: bool = False, immediate_start: bool = False, use_state_cache: bool = False):
+def get_initial_state(sheet_id: str | None = None, index_cache_minutes: int = 60, one_cycle: bool = False, skip_monitoring: bool = False, skip_sheets: bool = False, skip_update_board: bool = False, skip_send_email: bool = False, skip_send_slack: bool = False, mock_veps: bool = False, mock_analyzed_combined: bool = False, mock_alert_summary: bool = False, immediate_start: bool = False, use_state_cache: bool = False, vep_filter: list[str] | None = None):
     """Create initial state for the agent."""
     sheet_config = {
         "sheet_name": "VEP Status",  # Optional: name for the sheet/tab
@@ -114,6 +120,7 @@ def get_initial_state(sheet_id: str | None = None, index_cache_minutes: int = 60
         "mock_alert_summary": mock_alert_summary,  # Flag to skip LLM in alert_summary
         "immediate_start": immediate_start,  # Flag to start immediately without waiting for round hour
         "use_state_cache": use_state_cache,  # Flag to use cached state on first cycle
+        "vep_filter": vep_filter or [],  # Debug subset (--veps): only these VEPs are processed
         "_state_cache_used": False,  # Internal flag tracking if cache was used
         "_force_sheets_update": False,  # Internal flag to force sheets update on first cache cycle
     }
@@ -193,6 +200,8 @@ def log_startup_flags(args, index_cache_minutes: int) -> None:
         flags.append("  --immediate-start: enabled")
     if args.use_state_cache:
         flags.append("  --use-state-cache: enabled")
+    if args.veps:
+        flags.append(f"  --veps: {args.veps}")
 
     # Log all flags
     if flags:
@@ -222,6 +231,36 @@ def log_startup_flags(args, index_cache_minutes: int) -> None:
         log("Immediate-start mode: will run first cycle immediately and use current time + interval instead of round hours", node="main")
     if args.use_state_cache:
         log("Use-state-cache mode: first cycle will use cached state (skipping fetch/analyze), subsequent cycles run normally", node="main")
+    if args.veps:
+        log("VEP subset mode: only the listed VEPs are processed; board/sheets/email/Slack writes, detect_changes and snapshots are skipped", node="main")
+
+    # Config-gated LLM paths - make the active path visible at startup
+    from config.config import ALERT_SUMMARY_USE_LLM, ANALYZE_USE_TOOLS
+    log(f"analyze_combined: {'GitHub tools enabled' if ANALYZE_USE_TOOLS else 'tool-free (direct structured-output call, ANALYZE_USE_TOOLS=false)'}", node="main")
+    log(f"alert_summary: {'LLM formatting (ALERT_SUMMARY_USE_LLM=true)' if ALERT_SUMMARY_USE_LLM else 'deterministic fallback, no LLM call'}", node="main")
+
+
+def apply_vep_filter_mode(args) -> list[str]:
+    """Parse --veps and force the skip flags a subset debug run requires.
+
+    A subset run must never touch the board, sheets, or notifications: board
+    reconciliation would clear every VEP "missing" from the subset, and
+    detect_changes/snapshots would report the others as removed. The state
+    cache is redirected by save_state_cache via the vep_filter state key.
+
+    Returns the parsed filter tokens (empty list when --veps is not set).
+    """
+    vep_filter = [token.strip() for token in (args.veps or "").split(",") if token.strip()]
+    if vep_filter:
+        args.skip_update_board = True
+        args.skip_sheets = True
+        args.skip_send_email = True
+        args.skip_send_slack = True
+        log(f"VEP subset mode ({', '.join(vep_filter)}): forcing skip-update-board, "
+            "skip-sheets, skip-send-email, skip-send-slack; detect_changes and snapshot "
+            "are disabled; state cache goes to state_cache_subset.json",
+            node="main", level="WARNING")
+    return vep_filter
 
 
 def parse_args():
@@ -338,6 +377,11 @@ def parse_args():
         help="Use cached state from previous run on first cycle (skips fetch/analyze). Cache is created after each full analysis run. Useful for fast debug/test cycles."
     )
     parser.add_argument(
+        "--veps",
+        type=str,
+        help="Debug subset: comma-separated VEP numbers or names (e.g. '491,vep-0465'). Only these VEPs are processed; board/sheets/email/Slack writes, detect_changes and snapshots are force-skipped, and the state cache goes to cache/state_cache_subset.json so prod's cache is not polluted."
+    )
+    parser.add_argument(
         "--clear-history",
         action="store_true",
         help="Clear all history and caches (state_cache.json, index_cache.json, history snapshots, alert persistence) and exit. Useful for fresh starts."
@@ -433,6 +477,10 @@ def main():
     # Parse command line arguments
     args = parse_args()
 
+    # Debug subset mode: parse --veps and force the skip flags it requires
+    # (before logging startup flags, so the log shows the effective config)
+    vep_filter = apply_vep_filter_mode(args)
+
     # Handle --clear-history flag (clears caches and exits)
     if args.clear_history:
         log("Clearing all history and caches...", node="main")
@@ -442,6 +490,12 @@ def main():
         if STATE_CACHE_FILE.exists():
             STATE_CACHE_FILE.unlink()
             log(f"  Removed: {STATE_CACHE_FILE}", node="main")
+            cleared += 1
+
+        # Clear subset state cache (--veps debug runs)
+        if STATE_CACHE_SUBSET_FILE.exists():
+            STATE_CACHE_SUBSET_FILE.unlink()
+            log(f"  Removed: {STATE_CACHE_SUBSET_FILE}", node="main")
             cleared += 1
 
         # Clear index cache
@@ -521,13 +575,13 @@ def main():
 
     # Log startup configuration flags
     log_startup_flags(args, index_cache_minutes)
-    
+
     # Create the graph
     agent = create_graph()
     log("Graph created successfully", node="main")
-    
+
     # Initialize state
-    initial_state = get_initial_state(sheet_id=args.sheet_id, index_cache_minutes=index_cache_minutes, one_cycle=args.one_cycle, skip_monitoring=args.skip_monitoring, skip_sheets=args.skip_sheets, skip_update_board=args.skip_update_board, skip_send_email=args.skip_send_email, skip_send_slack=args.skip_send_slack, mock_veps=args.mock_veps, mock_analyzed_combined=args.mock_analyzed_combined, mock_alert_summary=args.mock_alert_summary, immediate_start=args.immediate_start, use_state_cache=args.use_state_cache)
+    initial_state = get_initial_state(sheet_id=args.sheet_id, index_cache_minutes=index_cache_minutes, one_cycle=args.one_cycle, skip_monitoring=args.skip_monitoring, skip_sheets=args.skip_sheets, skip_update_board=args.skip_update_board, skip_send_email=args.skip_send_email, skip_send_slack=args.skip_send_slack, mock_veps=args.mock_veps, mock_analyzed_combined=args.mock_analyzed_combined, mock_alert_summary=args.mock_alert_summary, immediate_start=args.immediate_start, use_state_cache=args.use_state_cache, vep_filter=vep_filter)
 
     # Load state cache if requested
     if args.use_state_cache:

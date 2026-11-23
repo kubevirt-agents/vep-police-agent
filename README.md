@@ -94,9 +94,9 @@ graph TD
 **Flow Summary:**
 1. `scheduler` coordinates all operations on configurable intervals.
 2. `fetch_veps` discovers VEPs from GitHub and returns to scheduler.
-3. Scheduler routes to `run_monitoring`, which fans out to five parallel check nodes (deadlines, activity, compliance, exceptions, phase risks) using Flash model.
+3. Scheduler routes to `run_monitoring`, which fans out to five parallel check nodes (deadlines, activity, compliance, exceptions, phase risks) using the fast model.
 4. `merge_vep_updates` combines context data (deterministic, no LLM).
-5. `analyze_combined` (Pro model) does cross-domain reasoning and generates alerts, anchored to `docs/governance-model.md` (phase playbook and policy rules) and a temporal-context object (cycle phase, days into/left in phase, next freeze) that calibrates urgency to where the cycle stands. Uses the previous release's code freeze date to distinguish current-release vs previous-release PRs - VEPs with only old PRs are flagged instead of shown as complete.
+5. `analyze_combined` (heavy model) does cross-domain reasoning and generates alerts, anchored to `docs/governance-model.md` (phase playbook, graduated-work rule, and policy rules) and a temporal-context object (cycle phase, days into/left in phase, next freeze) that calibrates urgency to where the cycle stands. Uses the previous release's code freeze date to distinguish current-release vs previous-release PRs - VEPs with only old PRs are flagged instead of shown as complete, except when the targeted stage's design already merged and its implementation landed or is progressing (then the VEP is on track).
 6. `detect_changes` compares to previous run for accurate change reporting.
 7. `update_sheets`, `update_project_board`, and `alert_summary` run on schedule; alerts fan out to email and Slack.
 
@@ -218,11 +218,12 @@ podman run --rm --pull=newer \
 **Mock/test flags:**
 | Flag | Description |
 |------|-------------|
-| `--fastest-model` | Use Flash model for all nodes |
+| `--fastest-model` | Use fast model for all nodes |
 | `--mock-veps` | Use mock VEPs (no GitHub fetch) |
 | `--mock-analyzed-combined` | Skip LLM in analyze node |
 | `--mock-alert-summary` | Skip LLM in alert node |
 | `--use-state-cache` | Use cached state from previous run |
+| `--veps 491,vep-0465` | Debug subset: only these VEPs. Force-skips board/sheets/email/Slack writes, detect_changes and snapshots, and writes the state cache to `cache/state_cache_subset.json` |
 
 **Cache control:**
 | Flag | Description |
@@ -258,15 +259,29 @@ podman run --rm --pull=newer \
 ### Models
 
 Two-tier approach configured in `config.py`:
-- **Flash** (fast): Fetch nodes (`fetch_veps`, `check_*`).
-- **Pro** (powerful): Analysis nodes (`analyze_combined`, `update_sheets`, `alert_summary`).
+- **Fast model**: Fetch nodes (`fetch_veps`, `check_*`).
+- **Powerful model**: Analysis nodes (`analyze_combined`, `update_sheets`, `alert_summary`).
 
 Override models via environment variables:
-- `FAST_MODEL` (default: `gemini-3-flash-preview`)
-- `HEAVY_MODEL` (default: `gemini-3.1-pro-preview`)
+- `FAST_MODEL` (default: `gemini-4-hydrogen`)
+- `HEAVY_MODEL` (default: `gemini-4-neon`)
 - `DEFAULT_MODEL` (default: same as `FAST_MODEL`)
+- `FAST_THINKING_LEVEL` (default: `low`) - thinking level for fast-tier nodes; empty string for model default
+- `HEAVY_THINKING_LEVEL` (default: `medium`) - thinking level for heavy-tier nodes; empty string for model default
 
-Use `--fastest-model` to force Flash everywhere for testing.
+The tier is resolved by node name (heavy: `analyze_combined`, `update_sheets`, `alert_summary`; everything else fast), not by model name, so single-model setups work.
+
+Other LLM settings (all env-overridable):
+- `LLM_TIMEOUT_FAST` (default: `300`) / `LLM_TIMEOUT_HEAVY` (default: `900`) - per-call timeout in seconds; the SDK aborts the HTTP call itself (surfacing as 504 DEADLINE_EXCEEDED) and the wrapper retries a timeout at most once, client-side or server-side alike
+- `LLM_MAX_OUTPUT_TOKENS` (default: `65536`) - output token cap per call (thinking tokens count against it)
+- `LLM_SDK_MAX_RETRIES` (default: `1`) - SDK-level retries per call, kept low so they don't multiply with wrapper retries
+- `FETCH_TOOL_RESULT_MAX_CHARS` (default: `20000`) - per-tool-result cap fed back into the conversation (head-biased truncation)
+- `FETCH_INPUT_TOKEN_BUDGET` (default: `650000`) - past this projected input size the fetch tool loop stops and the node answers with the data gathered so far
+- `FETCH_INPUT_TOKEN_HARD_CAP` (default: `900000`) - past this the newest tool results are also shrunk so the final call fits the context window
+- `ANALYZE_USE_TOOLS` (default: `false`) - when false, analyze_combined makes a direct structured-output call with no GitHub tools and no MCP server
+- `ALERT_SUMMARY_USE_LLM` (default: `false`) - when false, alert_summary uses the deterministic fallback summary instead of an LLM call
+
+Use `--fastest-model` to force the fast model everywhere for testing.
 
 ### Google Sheets
 
@@ -296,6 +311,7 @@ All operations run every 12 hours on round hours by default. Configure intervals
 Cache files in `cache/` directory:
 - `index_cache.json`: VEP data from GitHub (default: 60 min).
 - `state_cache.json`: State snapshot for `--use-state-cache`.
+- `state_cache_subset.json`: Same, but written by `--veps` subset runs so prod's cache is not polluted.
 - `history/`: Snapshots for change detection (keeps last 24).
 - `alert_persistence.json`: Tracks escalation logic.
 
@@ -337,6 +353,27 @@ python main.py --one-cycle \
 ls output/vep_snapshot_*.yaml
 cat output/realizations.txt
 ```
+
+### Replaying analysis on a cached state
+
+`scripts/replay_analyze.py` re-runs analyze_combined on a saved state cache -
+no graph, no scheduler, no external writes. Useful for tuning the heavy
+model / thinking level / timeout against real batch shapes:
+
+```bash
+# Inside the container, from /workspace
+python3 scripts/replay_analyze.py \
+  --state-cache cache/state_cache_subset.json \
+  --out output/replay_analyze.json
+
+# Optional: replay only some VEPs
+python3 scripts/replay_analyze.py --veps 491,465
+```
+
+Prints a per-VEP table (number, urgency, comment) plus wall time per batch,
+and writes `{number: {urgency, comment, attention_level, ...}}` to `--out`.
+Model/thinking/timeout come from the usual env vars (`HEAVY_MODEL`,
+`HEAVY_THINKING_LEVEL`, `LLM_TIMEOUT_HEAVY`).
 
 ## Troubleshooting
 

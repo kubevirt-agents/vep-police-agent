@@ -17,7 +17,7 @@ from state import VEPState
 def check_exceptions_node(state: VEPState) -> Any:
     """Fetch exception-related context for VEPs.
 
-    This is a FETCH node using lightweight LLM (Flash). It:
+    This is a FETCH node using lightweight LLM. It:
     1. Searches for exception requests in kubevirt/enhancements
     2. Checks for post-freeze work that might need exceptions
     3. Stores raw exception data in vep.context.exceptions

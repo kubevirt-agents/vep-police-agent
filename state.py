@@ -99,6 +99,10 @@ class PRInfo(BaseModel):
     has_approve: bool = False  # Has GitHub approval
     on_hold: bool = False  # Marked as on hold
     review_count: int = 0  # Number of reviews
+    # GitHub label names (e.g. "do-not-merge/hold", "lifecycle/rotten",
+    # "needs-rebase"). Populated for implementation PRs from the PRs index -
+    # blocking labels feed the "implementation is demonstrably blocked" guard.
+    labels: list[str] = []
 
     # Grounded conversation signals (see services.indexer.derive_pr_conversation_signals):
     # reviews, approved_count, changes_requested_count, changes_requested_unaddressed,
@@ -243,5 +247,6 @@ class VEPState(TypedDict):
     mock_alert_summary: bool  # Flag to skip LLM in alert_summary node
     immediate_start: bool  # Flag to start immediately without waiting for round hour
     use_state_cache: bool  # Flag to use cached state from previous run on first cycle
+    vep_filter: list[str]  # Debug subset: --veps tokens; non-empty filters fetch_veps to these VEPs only
     _state_cache_used: bool  # Internal flag tracking if state cache was used this run
     _force_sheets_update: bool  # Internal flag to force sheets update on first cache cycle

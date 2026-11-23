@@ -23,7 +23,7 @@ class DeadlineFetchResponse(FetchResponse):
 def check_deadlines_node(state: VEPState) -> Any:
     """Fetch deadline-related context for VEPs.
 
-    This is a FETCH node using lightweight LLM (Flash). It:
+    This is a FETCH node using lightweight LLM. It:
     1. Fetches release schedule from kubevirt/sig-release (if not cached)
     2. Computes days until EF and CF for each VEP
     3. Stores raw deadline data in vep.context.deadline
